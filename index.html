@@ -180,12 +180,10 @@ let usingLocalFallback = !hasCloudBackend;
 const storageAdapter = {
   async get(key, shared){
     if(hasCloudBackend){
-      try{
-        const res = await fetch(`${APPS_SCRIPT_URL}?action=get&key=${encodeURIComponent(key)}`);
-        const data = await res.json();
-        if(data && !data.error && data.value !== undefined) return data;
-        return null;
-      }catch(e){ console.error('Error leyendo', key, e); return null; }
+      const res = await fetch(`${APPS_SCRIPT_URL}?action=get&key=${encodeURIComponent(key)}`);
+      const data = await res.json();
+      if(data && !data.error && data.value !== undefined) return data;
+      return null;
     }
     const raw = localStorage.getItem('geofleet_v1_'+key);
     return raw ? {key, value: raw, shared: !!shared} : null;
@@ -227,12 +225,54 @@ const CONTRATO_TYPES_BASE = ['Contrato de locación','Constancia de CUIT','Const
 let customDocTypes = [];
 let customContratoTypes = [];
 
+/* ===== Carga de datos combinada =====
+   Antes, arrancar la app hacía 4 pedidos separados a Apps Script, uno detrás
+   de otro (vehiculos, perfil, customDocTypes, customContratoTypes). Ahora se
+   guardan y se leen todos juntos bajo una sola clave ("appData"), así que
+   arrancar la app necesita un único viaje al servidor en vez de cuatro.
+   Si todavía no existe esa clave combinada (por ejemplo, la primera vez que
+   se abre esta versión nueva), se migran automáticamente los datos viejos
+   guardados en las 4 claves separadas, y se guarda ya combinado para la
+   próxima vez. */
+async function loadAppData(){
+  const combined = await storageAdapter.get('appData', false);
+  if(combined){
+    const d = JSON.parse(combined.value);
+    vehiculos = d.vehiculos || [];
+    if(d.perfil) perfil = d.perfil;
+    customDocTypes = d.customDocTypes || [];
+    customContratoTypes = d.customContratoTypes || [];
+    return;
+  }
+  // Migración: todavía no existe "appData", se buscan las 4 claves viejas
+  // en paralelo (más rápido que una detrás de otra) y se combinan.
+  const [rv, rp, rd, rc] = await Promise.all([
+    storageAdapter.get('vehiculos', false),
+    storageAdapter.get('perfil', false),
+    storageAdapter.get('customDocTypes', false),
+    storageAdapter.get('customContratoTypes', false)
+  ]);
+  vehiculos = rv ? JSON.parse(rv.value) : [];
+  if(rp) perfil = JSON.parse(rp.value);
+  if(rd) customDocTypes = JSON.parse(rd.value);
+  if(rc) customContratoTypes = JSON.parse(rc.value);
+  await saveAppData();
+}
+
+async function saveAppData(){
+  try{ await storageAdapter.set('appData', JSON.stringify({vehiculos, perfil, customDocTypes, customContratoTypes}), false); }
+  catch(e){ console.error('Error guardando appData', e); }
+}
+
 init();
 async function init(){
-  try{ const r = await storageAdapter.get('vehiculos', false); vehiculos = r ? JSON.parse(r.value) : []; }catch(e){ vehiculos = []; }
-  try{ const r = await storageAdapter.get('perfil', false); if(r) perfil = JSON.parse(r.value); }catch(e){}
-  try{ const r = await storageAdapter.get('customDocTypes', false); if(r) customDocTypes = JSON.parse(r.value); }catch(e){}
-  try{ const r = await storageAdapter.get('customContratoTypes', false); if(r) customContratoTypes = JSON.parse(r.value); }catch(e){}
+  try{
+    await loadAppData();
+  }catch(e){
+    console.error('Error cargando datos', e);
+    showLoadError();
+    return;
+  }
   applyPerfilUI();
   renderVehList();
   const note = document.getElementById('storageNote');
@@ -241,6 +281,19 @@ async function init(){
       ? 'Guardado localmente en este navegador (no en la nube). Si cambiás de compu o de navegador, no vas a ver estos datos.'
       : 'Los datos se guardan en tu cuenta de Claude.';
   }
+}
+
+function showLoadError(){
+  const main = document.getElementById('main');
+  if(main){
+    main.innerHTML = `<div class="empty-state">
+      <h2>No se pudo conectar</h2>
+      <p>Revisá tu conexión a internet (wifi o datos móviles) e intentá de nuevo. Si el problema sigue, probá cerrar y volver a abrir la app.</p>
+      <button class="btn btn-primary" style="margin-top:14px;" onclick="location.reload()">Reintentar</button>
+    </div>`;
+  }
+  const note = document.getElementById('storageNote');
+  if(note) note.textContent = 'No se pudo conectar. Tocá "Reintentar" arriba.';
 }
 
 function applyPerfilUI(){
@@ -274,7 +327,7 @@ function openNewVehicle(){
 }
 
 async function saveVehiculosList(){
-  try{ await storageAdapter.set('vehiculos', JSON.stringify(vehiculos), false); }catch(e){ console.error(e); }
+  await saveAppData();
   renderVehList();
 }
 
@@ -558,7 +611,7 @@ async function uploadMultiple(fileList, maxW, quality){
 async function addDocumento(){
   const tipo = document.getElementById('docTipo').value.trim();
   if(!tipo){ alert('Indicá el tipo de documento.'); return; }
-  if(!allDocTypes().includes(tipo)){ customDocTypes.push(tipo); storageAdapter.set('customDocTypes', JSON.stringify(customDocTypes), false); }
+  if(!allDocTypes().includes(tipo)){ customDocTypes.push(tipo); saveAppData(); }
   const venc = document.getElementById('docVenc').value;
   const nota = document.getElementById('docNota').value;
   const fileInput = document.getElementById('docFile');
@@ -645,7 +698,7 @@ function onConFileChange(input){
 async function addContrato(){
   const tipo = document.getElementById('conTipo').value.trim();
   if(!tipo){ alert('Indicá el tipo de documento.'); return; }
-  if(!allContratoTypes().includes(tipo)){ customContratoTypes.push(tipo); storageAdapter.set('customContratoTypes', JSON.stringify(customContratoTypes), false); }
+  if(!allContratoTypes().includes(tipo)){ customContratoTypes.push(tipo); saveAppData(); }
   const empresa = document.getElementById('conEmpresa').value;
   const fecha = document.getElementById('conFecha').value;
   const nota = document.getElementById('conNota').value;
@@ -1149,7 +1202,7 @@ async function savePerfil(){
   perfil.email = document.getElementById('pEmail').value;
   const img = document.getElementById('pLogoPrev');
   if(img.dataset.newLogo) perfil.logo = img.dataset.newLogo;
-  try{ await storageAdapter.set('perfil', JSON.stringify(perfil), false); }catch(e){}
+  await saveAppData();
   applyPerfilUI();
   closeOverlay('perfilOverlay');
 }

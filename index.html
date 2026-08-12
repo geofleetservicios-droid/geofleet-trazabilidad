@@ -259,27 +259,73 @@ async function loadAppData(){
   await saveAppData();
 }
 
+/* ===== Copia local para carga instantánea =====
+   Además de guardar en la nube, se guarda una copia en el propio dispositivo
+   (localStorage). La próxima vez que se abra la app EN ESE MISMO dispositivo,
+   se muestra esa copia al instante (sin esperar a Apps Script) mientras se
+   trae la versión actualizada de fondo. Si tarda o falla la conexión, el
+   usuario igual ve sus camionetas en vez de una pantalla vacía o en blanco. */
+const APP_CACHE_KEY = 'geofleet_cache_v1';
+
+function readAppCache(){
+  try{
+    const raw = localStorage.getItem(APP_CACHE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  }catch(e){ return null; }
+}
+
+function writeAppCache(){
+  try{ localStorage.setItem(APP_CACHE_KEY, JSON.stringify({vehiculos, perfil, customDocTypes, customContratoTypes})); }
+  catch(e){ console.error('Error guardando copia local', e); }
+}
+
+function applyAppData(d){
+  vehiculos = d.vehiculos || [];
+  if(d.perfil) perfil = d.perfil;
+  customDocTypes = d.customDocTypes || [];
+  customContratoTypes = d.customContratoTypes || [];
+}
+
 async function saveAppData(){
   try{ await storageAdapter.set('appData', JSON.stringify({vehiculos, perfil, customDocTypes, customContratoTypes}), false); }
   catch(e){ console.error('Error guardando appData', e); }
+  writeAppCache();
 }
 
 init();
 async function init(){
+  // 1) Si hay una copia guardada en este dispositivo, se muestra ya mismo.
+  const cached = readAppCache();
+  if(cached){
+    applyAppData(cached);
+    applyPerfilUI();
+    renderVehList();
+    const note = document.getElementById('storageNote');
+    if(note) note.textContent = 'Mostrando datos guardados en este dispositivo. Actualizando…';
+  }
+
+  // 2) En paralelo (o si no había copia local), se trae la versión más
+  // reciente de la nube y se refresca la pantalla cuando llega.
   try{
     await loadAppData();
+    writeAppCache();
+    applyPerfilUI();
+    renderVehList();
+    const note = document.getElementById('storageNote');
+    if(note){
+      note.textContent = usingLocalFallback
+        ? 'Guardado localmente en este navegador (no en la nube). Si cambiás de compu o de navegador, no vas a ver estos datos.'
+        : 'Los datos se guardan en tu cuenta de Claude.';
+    }
   }catch(e){
     console.error('Error cargando datos', e);
-    showLoadError();
-    return;
-  }
-  applyPerfilUI();
-  renderVehList();
-  const note = document.getElementById('storageNote');
-  if(note){
-    note.textContent = usingLocalFallback
-      ? 'Guardado localmente en este navegador (no en la nube). Si cambiás de compu o de navegador, no vas a ver estos datos.'
-      : 'Los datos se guardan en tu cuenta de Claude.';
+    if(cached){
+      // Ya se está mostrando la copia local: se avisa pero no se tapa la pantalla.
+      const note = document.getElementById('storageNote');
+      if(note) note.textContent = 'No se pudo actualizar desde la nube. Mostrando la última versión guardada en este dispositivo.';
+    }else{
+      showLoadError();
+    }
   }
 }
 

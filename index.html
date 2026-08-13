@@ -133,6 +133,18 @@
   .modal h3{margin-top:0;}
   .modal-close{float:right; background:none; border:none; font-size:18px; cursor:pointer; color:var(--muted); padding:4px 8px; line-height:1;}
   .modal-close:hover{color:var(--red);}
+  .file-preview-modal{background:#fff; border-radius:12px; width:100%; max-width:720px; max-height:90vh; display:flex; flex-direction:column; overflow:hidden;}
+  .file-preview-head{display:flex; align-items:center; justify-content:space-between; padding:12px 16px; border-bottom:1px solid var(--line);}
+  .file-preview-body{padding:14px; overflow:auto;}
+  .file-tile{cursor:pointer; border:none; background:none; padding:0; display:block;}
+  .office-tile{width:100%; height:100%; min-height:64px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px; border-radius:6px; border:1px solid var(--line); background:#EEF3F8; color:#2C6E9B; font-weight:700; font-size:11px; text-align:center; cursor:pointer;}
+  .office-tile .ic{font-size:20px; line-height:1;}
+  .check-light{display:inline-flex; align-items:center; gap:7px; font-size:12.5px; font-weight:600; padding:5px 10px; border-radius:20px;}
+  .check-light .dot{width:11px; height:11px; border-radius:50%; display:inline-block;}
+  .check-light.ok{background:#E7F6ED; color:#1E7B45;}
+  .check-light.ok .dot{background:#22A155; box-shadow:0 0 0 3px rgba(34,161,85,.18);}
+  .check-light.miss{background:#FDECEC; color:#B23A1B;}
+  .check-light.miss .dot{background:#E0483C; box-shadow:0 0 0 3px rgba(224,72,60,.16);}
   .checkline{display:flex; align-items:center; gap:9px; padding:8px 0; border-bottom:1px solid var(--line); font-size:13.5px;}
   .checkline:last-child{border-bottom:none;}
   .logo-preview{width:56px; height:56px; border-radius:8px; object-fit:contain; border:1px solid var(--line); background:#f2f2f2;}
@@ -147,6 +159,8 @@
     .veh-list{flex-direction:row; flex-wrap:wrap; width:100%;}
     .grid2,.grid3,.seguro-grid{grid-template-columns:1fr;}
     .main{padding:18px;}
+    .file-preview-modal{max-width:100%; max-height:92vh;}
+    .file-preview-body iframe{height:60vh !important;}
   }
 </style>
 </head>
@@ -168,6 +182,17 @@
       <h2>Ninguna camioneta seleccionada</h2>
       <p>Agregá una camioneta por patente para empezar a cargar su ficha de trazabilidad.</p>
     </div>
+  </div>
+</div>
+
+<!-- Visor interno de archivos (fotos, PDF, Word, Excel). Persistente: sirve en cualquier pestaña. -->
+<div class="overlay file-preview-overlay" id="filePreviewOverlay" style="display:none;" onclick="if(event.target===this) closeFilePreview()">
+  <div class="file-preview-modal">
+    <div class="file-preview-head">
+      <b id="filePreviewTitle" style="font-size:13.5px; word-break:break-word; padding-right:8px;">Archivo</b>
+      <button class="modal-close" onclick="closeFilePreview()" style="float:none;">✕</button>
+    </div>
+    <div id="filePreviewBody" class="file-preview-body"></div>
   </div>
 </div>
 
@@ -209,7 +234,7 @@ let usingLocalFallback = !hasCloudBackend;
    Sin esto, con señal débil la app se quedaba esperando para siempre y parecía
    trabada. Ahora corta y avisa. Leer tiene un límite corto; guardar uno más
    largo, porque puede estar subiendo fotos. */
-const TIMEOUT_LECTURA_MS = 25000;
+const TIMEOUT_LECTURA_MS = 40000;
 const TIMEOUT_GUARDADO_MS = 90000;
 async function fetchConLimite(url, options, ms){
   const ctrl = new AbortController();
@@ -267,6 +292,8 @@ let editingContratoId = null;
 let editingSiniestroId = null;
 let regMantFotos = [];
 let regMantArchivos = [];
+let regAlqChecklist = null;   // Check List del alquiler (un archivo, opcional)
+let regAlqFotos = [];         // Fotos del alquiler
 let sinFotosTemp = [];
 let sinComprobantesTemp = [];
 let sinCopiasTemp = [];
@@ -345,6 +372,13 @@ async function saveAppData(){
 
 init();
 async function init(){
+  // 0) Mientras no haya nada para mostrar (ni copia local ni respuesta de la
+  // nube), se avisa que está cargando en vez de dejar la lista vacía. Sin
+  // esto, en una red móvil lenta la pantalla se ve en blanco varios segundos
+  // y parece que la app no anda.
+  const vehListEl = document.getElementById('vehList');
+  if(vehListEl) vehListEl.innerHTML = '<div style="color:#9AA6B2; font-size:12.5px; padding:10px 4px;">Cargando camionetas…</div>';
+
   // 1) Si hay una copia guardada en este dispositivo, se muestra ya mismo.
   const cached = readAppCache();
   if(cached){
@@ -387,6 +421,16 @@ function showLoadError(){
       <h2>No se pudo conectar</h2>
       <p>Revisá tu conexión a internet (wifi o datos móviles) e intentá de nuevo. Si el problema sigue, probá cerrar y volver a abrir la app.</p>
       <button class="btn btn-primary" style="margin-top:14px;" onclick="location.reload()">Reintentar</button>
+    </div>`;
+  }
+  // El mensaje también se pone acá arriba, en la lista de camionetas, porque
+  // en el celular el panel principal (de arriba) queda debajo del scroll y
+  // el aviso pasaba desapercibido: parecía que la app no cargaba nada.
+  const vehListEl = document.getElementById('vehList');
+  if(vehListEl){
+    vehListEl.innerHTML = `<div style="color:#E8A55C; font-size:12.5px; padding:10px 4px; line-height:1.5;">
+      ⚠️ No se pudo conectar.<br>
+      <a href="#" onclick="location.reload();return false;" style="color:#fff; text-decoration:underline;">Tocá para reintentar</a>
     </div>`;
   }
   const note = document.getElementById('storageNote');
@@ -474,6 +518,7 @@ function vehInfo(){ return vehiculos.find(v=>v.patente===current) || {}; }
 function logHistorial(accion){ if(!currentData.historial) currentData.historial = []; currentData.historial.push({fecha: new Date().toISOString(), accion}); }
 
 function renderMain(){
+  __fileReg = [];
   const v = vehInfo();
   const main = document.getElementById('main');
   main.innerHTML = `
@@ -492,7 +537,7 @@ function renderMain(){
       <div class="tab ${activeTab==='documentos'?'active':''}" onclick="setTab('documentos')">Documentación</div>
       <div class="tab ${activeTab==='fotos'?'active':''}" onclick="setTab('fotos')">Fotos</div>
       <div class="tab ${activeTab==='seguros'?'active':''}" onclick="setTab('seguros')">Seguros</div>
-      <div class="tab ${activeTab==='registros'?'active':''}" onclick="setTab('registros')">Registro de uso y mantenimiento</div>
+      <div class="tab ${activeTab==='registros'?'active':''}" onclick="setTab('registros')">Alquileres / Mantenimiento</div>
       <div class="tab ${activeTab==='siniestros'?'active':''}" onclick="setTab('siniestros')">Siniestros/Infracciones</div>
       <div class="tab ${activeTab==='contratos'?'active':''}" onclick="setTab('contratos')">Contrato/Legales</div>
       <div class="tab ${activeTab==='historial'?'active':''}" onclick="setTab('historial')">Historial</div>
@@ -501,7 +546,7 @@ function renderMain(){
   `;
   renderTab();
 }
-function setTab(t){ activeTab = t; editingDocId=null; editingRegId=null; editingContratoId=null; editingSiniestroId=null; regMantFotos=[]; regMantArchivos=[]; sinFotosTemp=[]; sinComprobantesTemp=[]; sinCopiasTemp=[]; renderMain(); }
+function setTab(t){ activeTab = t; editingDocId=null; editingRegId=null; editingContratoId=null; editingSiniestroId=null; regMantFotos=[]; regMantArchivos=[]; regAlqChecklist=null; regAlqFotos=[]; sinFotosTemp=[]; sinComprobantesTemp=[]; sinCopiasTemp=[]; renderMain(); }
 
 function renderTab(){
   const c = document.getElementById('tabContent');
@@ -524,6 +569,7 @@ function renderTab(){
     c.innerHTML = tplRegistros();
     const editing = editingRegId ? currentData.registros.find(r=>r.id===editingRegId) : null;
     if(editing && editing.tipo==='mantenimiento'){ regMantFotos=[...(editing.fotos||[])]; regMantArchivos=[...(editing.archivos||[])]; }
+    if(editing && editing.tipo==='uso'){ regAlqChecklist = editing.checklist || null; regAlqFotos = [...(editing.fotos||[])]; }
     renderRegFields(editing?editing.tipo:'uso', editing);
   }
   if(activeTab==='historial') c.innerHTML = tplHistorial();
@@ -566,13 +612,75 @@ async function handleUpload(file, maxW, quality){
     const data = await readAsDataURL(file);
     return {fileData: data, fileType:'pdf', fileName:file.name};
   }
+  if(isOfficeFile(file)){
+    if(file.size > 6000*1024){ alert('El archivo pesa '+Math.round(file.size/1024)+' KB. Subí uno de menos de 6 MB para que el sistema no se sature.'); return null; }
+    const data = await readAsDataURL(file);
+    return {fileData: data, fileType:'office', fileName:file.name, ext:fileExt(file.name)};
+  }
   const data = await resizeImage(file, maxW||FOTO_ANCHO, quality||FOTO_CALIDAD);
   return {fileData: data, fileType:'image', fileName:file.name};
 }
 function fileThumb(item, cssClass){
   if(!item || !item.fileData) return `<div class="${cssClass}"></div>`;
-  if(item.fileType==='pdf') return `<a href="${item.fileData}" target="_blank" class="${cssClass==='doc-thumb'?'pdf-thumb':cssClass}">PDF</a>`;
-  return `<img class="${cssClass}" src="${item.fileData}" loading="lazy" decoding="async">`;
+  const i = regFile(item);
+  if(item.fileType==='pdf') return `<a class="file-tile ${cssClass==='doc-thumb'?'pdf-thumb':cssClass}" onclick="openReg(${i})">PDF</a>`;
+  if(item.fileType==='office'){ const k=officeKind(item.ext||item.fileName); return `<div class="office-tile" onclick="openReg(${i})"><span class="ic">${k==='excel'?'📊':'📄'}</span>${k==='excel'?'EXCEL':'WORD'}</div>`; }
+  return `<img class="file-tile ${cssClass}" src="${item.fileData}" loading="lazy" decoding="async" onclick="openReg(${i})">`;
+}
+
+/* ---------- ARCHIVOS: tipos admitidos + visor interno ---------- */
+// Todos los casilleros aceptan foto, PDF, Word y Excel.
+const ACCEPT_ARCHIVOS = 'image/*,application/pdf,.doc,.docx,.xls,.xlsx,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+function fileExt(name){ const m = /\.([a-z0-9]+)$/i.exec(name||''); return m?m[1].toLowerCase():''; }
+function isOfficeFile(file){
+  const ext = fileExt(file.name);
+  return ['doc','docx','xls','xlsx'].includes(ext) || /officedocument|msword|ms-excel/.test(file.type||'');
+}
+function officeKind(nameOrExt){
+  const e = (nameOrExt||'').toLowerCase();
+  if(/(xls|excel|sheet)/.test(e)) return 'excel';
+  return 'word';
+}
+
+// Registro liviano de archivos para el visor: guarda solo un índice en cada
+// tile en vez de meter el base64 (enorme) dentro del atributo onclick.
+let __fileReg = [];
+function regFile(f){ if(!f || !f.fileData) return -1; __fileReg.push(f); return __fileReg.length-1; }
+function openReg(i){ const f=__fileReg[i]; if(f) openFilePreview(f); }
+
+// Genera un tile clickeable uniforme (foto / PDF / Word / Excel) para usar
+// dentro de las grillas .photo-grid de los formularios.
+function previewTile(f){
+  const i = regFile(f);
+  if(f.fileType==='office'){ const k=officeKind(f.ext||f.fileName||f.desc); return `<div class="office-tile" onclick="openReg(${i})"><span class="ic">${k==='excel'?'📊':'📄'}</span>${k==='excel'?'EXCEL':'WORD'}</div>`; }
+  if(f.fileType==='pdf'){ return `<a class="file-tile pdf-tile" onclick="openReg(${i})">PDF</a>`; }
+  return `<img class="file-tile" src="${f.fileData}" loading="lazy" decoding="async" onclick="openReg(${i})">`;
+}
+
+function openFilePreview(f){
+  const name = f.fileName || f.desc || 'Archivo';
+  let inner;
+  if(f.fileType==='image'){
+    inner = `<img src="${f.fileData}" style="max-width:100%; max-height:72vh; display:block; margin:0 auto; border-radius:6px;">`;
+  } else if(f.fileType==='pdf'){
+    inner = `<iframe src="${f.fileData}" style="width:100%; height:72vh; border:1px solid var(--line); border-radius:6px;"></iframe>`;
+  } else {
+    // Word / Excel: el navegador no los muestra; se ofrece descargar/abrir.
+    const k = officeKind(f.ext || f.fileName || name);
+    inner = `<div style="text-align:center; padding:32px 14px;">
+      <div style="font-size:46px; margin-bottom:10px;">${k==='excel'?'📊':'📄'}</div>
+      <div style="font-weight:600; margin-bottom:4px; word-break:break-word;">${name}</div>
+      <div style="color:var(--muted); font-size:12.5px; margin-bottom:18px;">Los archivos de Word y Excel no se pueden ver dentro del navegador.</div>
+      <a class="btn btn-primary" href="${f.fileData}" download="${name}">⭳ Descargar / Abrir</a>
+    </div>`;
+  }
+  document.getElementById('filePreviewTitle').textContent = name;
+  document.getElementById('filePreviewBody').innerHTML = inner;
+  document.getElementById('filePreviewOverlay').style.display = 'flex';
+}
+function closeFilePreview(){
+  document.getElementById('filePreviewOverlay').style.display = 'none';
+  document.getElementById('filePreviewBody').innerHTML = '';
 }
 
 /* ---------- DATOS ---------- */
@@ -633,16 +741,24 @@ function tplSeguros(){
 }
 function seguroCard(key, seg){
   const st = seguroStatus(seg);
-  const thumb = seg.fileData
-    ? (seg.fileType==='pdf' ? `<a href="${seg.fileData}" target="_blank" class="seguro-thumb-pdf">Ver PDF</a>` : `<img class="seguro-thumb" src="${seg.fileData}" loading="lazy" decoding="async">`)
-    : `<div class="seguro-thumb"></div>`;
+  let thumb;
+  if(!seg.fileData){
+    thumb = `<div class="seguro-thumb"></div>`;
+  } else if(seg.fileType==='pdf'){
+    thumb = `<a class="seguro-thumb-pdf" onclick="openReg(${regFile(seg)})">Ver PDF</a>`;
+  } else if(seg.fileType==='office'){
+    const k = officeKind(seg.ext||seg.fileName);
+    thumb = `<div class="seguro-thumb-pdf" style="background:#EEF3F8; color:#2C6E9B;" onclick="openReg(${regFile(seg)})">${k==='excel'?'📊 Ver Excel':'📄 Ver Word'}</div>`;
+  } else {
+    thumb = `<img class="seguro-thumb file-tile" src="${seg.fileData}" loading="lazy" decoding="async" onclick="openReg(${regFile(seg)})">`;
+  }
   return `
     <div class="seguro-card">
       <div class="seguro-head"><b>${SEG_LABELS[key]}</b><span><span class="dot dot-${st.cls}"></span>${st.label}</span></div>
       ${thumb}
       <div class="field" style="margin:0;"><label>Vencimiento</label><input type="date" id="seg_${key}_venc" value="${seg.vencimiento||''}" ${readerMode?'disabled':''} onchange="saveSeguroField('${key}')"></div>
-      <input type="file" id="seg_${key}_file" accept="image/*,application/pdf" style="display:none" onchange="onSeguroFile('${key}', this)">
-      <button class="file-btn ${seg.fileData?'has-file':''}" ${readerMode?'style="pointer-events:none;opacity:.5;"':''} onclick="document.getElementById('seg_${key}_file').click()">${seg.fileData?'Reemplazar (foto o PDF)':'Subir foto o PDF'}</button>
+      <input type="file" id="seg_${key}_file" accept="${ACCEPT_ARCHIVOS}" style="display:none" onchange="onSeguroFile('${key}', this)">
+      <button class="file-btn ${seg.fileData?'has-file':''}" ${readerMode?'style="pointer-events:none;opacity:.5;"':''} onclick="document.getElementById('seg_${key}_file').click()">${seg.fileData?'Reemplazar archivo':'Subir foto, PDF, Word o Excel'}</button>
     </div>`;
 }
 function seguroStatus(seg){
@@ -660,6 +776,7 @@ async function onSeguroFile(key, input){
   currentData.seguros[key].fileData = res.fileData;
   currentData.seguros[key].fileType = res.fileType;
   currentData.seguros[key].fileName = res.fileName;
+  currentData.seguros[key].ext = res.ext;
   logHistorial(SEG_LABELS[key]+' actualizado ('+res.fileType+')');
   await saveCurrentFicha();
   renderTab();
@@ -687,8 +804,8 @@ function tplDocumentos(){
         <div class="field"><label>Vencimiento (si aplica)</label><input type="date" id="docVenc" value="${editing?editing.vencimiento||'':''}"></div>
         <div class="field" style="flex:2"><label>Nota</label><input type="text" id="docNota" placeholder="Ej: póliza N° 12345" value="${editing?editing.nota||'':''}"></div>
         <div class="field" style="flex:0 0 auto;"><label>Archivo(s)</label>
-          <input type="file" id="docFile" accept="image/*,application/pdf" multiple style="display:none" onchange="onDocFileChange(this)">
-          <div class="file-btn" id="docFileBtn" onclick="document.getElementById('docFile').click()">${editing&&editing.fileData?'Reemplazar':'Fotos o PDF'}</div>
+          <input type="file" id="docFile" accept="${ACCEPT_ARCHIVOS}" multiple style="display:none" onchange="onDocFileChange(this)">
+          <div class="file-btn" id="docFileBtn" onclick="document.getElementById('docFile').click()">${editing&&editing.fileData?'Reemplazar':'Foto, PDF, Word o Excel'}</div>
         </div>
         <button class="btn btn-primary btn-sm" onclick="${editing?'saveDocEdit()':'addDocumento()'}">${editing?'Guardar':'Agregar'}</button>
         ${editing?'<button class="btn btn-ghost btn-sm" onclick="cancelDocEdit()">Cancelar</button>':''}
@@ -723,7 +840,7 @@ function docStatus(venc){
 }
 function onDocFileChange(input){
   const btn = document.getElementById('docFileBtn');
-  btn.textContent = input.files.length>1 ? (input.files.length+' archivos seleccionados') : (input.files[0] ? input.files[0].name : 'Fotos o PDF');
+  btn.textContent = input.files.length>1 ? (input.files.length+' archivos seleccionados') : (input.files[0] ? input.files[0].name : 'Foto, PDF, Word o Excel');
   btn.classList.toggle('has-file', !!input.files.length);
 }
 async function uploadMultiple(fileList, maxW, quality){
@@ -786,8 +903,8 @@ function tplContratos(){
         <div class="field"><label>Fecha</label><input type="date" id="conFecha" value="${editing?editing.fecha||'':''}"></div>
         <div class="field" style="flex:2"><label>Nota</label><input type="text" id="conNota" placeholder="Ej: contrato N°, vigencia" value="${editing?editing.nota||'':''}"></div>
         <div class="field" style="flex:0 0 auto;"><label>Archivo(s)</label>
-          <input type="file" id="conFile" accept="image/*,application/pdf" multiple style="display:none" onchange="onConFileChange(this)">
-          <div class="file-btn" id="conFileBtn" onclick="document.getElementById('conFile').click()">${editing&&editing.fileData?'Reemplazar':'Fotos o PDF'}</div>
+          <input type="file" id="conFile" accept="${ACCEPT_ARCHIVOS}" multiple style="display:none" onchange="onConFileChange(this)">
+          <div class="file-btn" id="conFileBtn" onclick="document.getElementById('conFile').click()">${editing&&editing.fileData?'Reemplazar':'Foto, PDF, Word o Excel'}</div>
         </div>
         <button class="btn btn-primary btn-sm" onclick="${editing?'saveContratoEdit()':'addContrato()'}">${editing?'Guardar':'Agregar'}</button>
         ${editing?'<button class="btn btn-ghost btn-sm" onclick="cancelContratoEdit()">Cancelar</button>':''}
@@ -815,7 +932,7 @@ function contratoCard(d){
 }
 function onConFileChange(input){
   const btn = document.getElementById('conFileBtn');
-  btn.textContent = input.files.length>1 ? (input.files.length+' archivos seleccionados') : (input.files[0] ? input.files[0].name : 'Fotos o PDF');
+  btn.textContent = input.files.length>1 ? (input.files.length+' archivos seleccionados') : (input.files[0] ? input.files[0].name : 'Foto, PDF, Word o Excel');
   btn.classList.toggle('has-file', !!input.files.length);
 }
 async function addContrato(){
@@ -903,14 +1020,14 @@ function renderSinFields(categoria, editingObj){
         <div class="field"><label>Detalle</label><input type="text" id="sinDetalle" placeholder="Descripción breve" value="${e&&e.detalle||''}"></div>
       </div>
       <div class="field"><label>Comprobante de pago</label>
-        <input type="file" id="sinCompInput" accept="image/*,application/pdf" multiple style="display:none" onchange="addSinComprobante(this)">
+        <input type="file" id="sinCompInput" accept="${ACCEPT_ARCHIVOS}" multiple style="display:none" onchange="addSinComprobante(this)">
         <button type="button" class="file-btn" onclick="document.getElementById('sinCompInput').click()">+ Agregar comprobante de pago</button>
-        <div class="photo-grid" style="margin-top:8px;">${sinComprobantesTemp.map((f,i)=>`<div class="photo-item">${f.fileType==='pdf'?`<a href="${f.fileData}" target="_blank" class="pdf-tile">PDF</a>`:`<img src="${f.fileData}" loading="lazy" decoding="async">`}<button class="del" onclick="delSinComprobante(${i})">✕</button></div>`).join('')}</div>
+        <div class="photo-grid" style="margin-top:8px;">${sinComprobantesTemp.map((f,i)=>`<div class="photo-item">${previewTile(f)}<button class="del" onclick="delSinComprobante(${i})">✕</button><div class="cap">${f.fileName||''}</div></div>`).join('')}</div>
       </div>
       <div class="field"><label>Copia de la infracción</label>
-        <input type="file" id="sinCopiaInput" accept="image/*,application/pdf" multiple style="display:none" onchange="addSinCopia(this)">
+        <input type="file" id="sinCopiaInput" accept="${ACCEPT_ARCHIVOS}" multiple style="display:none" onchange="addSinCopia(this)">
         <button type="button" class="file-btn" onclick="document.getElementById('sinCopiaInput').click()">+ Agregar copia de la infracción</button>
-        <div class="photo-grid" style="margin-top:8px;">${sinCopiasTemp.map((f,i)=>`<div class="photo-item">${f.fileType==='pdf'?`<a href="${f.fileData}" target="_blank" class="pdf-tile">PDF</a>`:`<img src="${f.fileData}" loading="lazy" decoding="async">`}<button class="del" onclick="delSinCopia(${i})">✕</button></div>`).join('')}</div>
+        <div class="photo-grid" style="margin-top:8px;">${sinCopiasTemp.map((f,i)=>`<div class="photo-item">${previewTile(f)}<button class="del" onclick="delSinCopia(${i})">✕</button><div class="cap">${f.fileName||''}</div></div>`).join('')}</div>
       </div>`;
   } else {
     wrap.innerHTML = `
@@ -930,9 +1047,9 @@ function renderSinFields(categoria, editingObj){
         <div class="field"><label>Detalle</label><input type="text" id="sinDetalle" placeholder="Descripción breve" value="${e&&e.detalle||''}"></div>
       </div>
       <div class="field"><label>Fotos / archivos del siniestro</label>
-        <input type="file" id="sinFotoInput" accept="image/*,application/pdf" multiple style="display:none" onchange="addSinFoto(this)">
+        <input type="file" id="sinFotoInput" accept="${ACCEPT_ARCHIVOS}" multiple style="display:none" onchange="addSinFoto(this)">
         <button type="button" class="file-btn" onclick="document.getElementById('sinFotoInput').click()">+ Agregar fotos o PDF</button>
-        <div class="photo-grid" style="margin-top:8px;">${sinFotosTemp.map((f,i)=>`<div class="photo-item">${f.fileType==='pdf'?`<a href="${f.fileData}" target="_blank" class="pdf-tile">PDF</a>`:`<img src="${f.fileData}" loading="lazy" decoding="async">`}<button class="del" onclick="delSinFoto(${i})">✕</button></div>`).join('')}</div>
+        <div class="photo-grid" style="margin-top:8px;">${sinFotosTemp.map((f,i)=>`<div class="photo-item">${previewTile(f)}<button class="del" onclick="delSinFoto(${i})">✕</button><div class="cap">${f.fileName||''}</div></div>`).join('')}</div>
       </div>`;
   }
 }
@@ -1071,8 +1188,8 @@ function tplFotos(){
       <div class="upload-row">
         <div class="field" style="flex:2"><label>Descripción (para individuales)</label><input type="text" id="fotoDesc" placeholder="Ej: estado general, entrega a cliente X"></div>
         <div class="field" style="flex:0 0 auto;"><label>Uno o varios archivos</label>
-          <input type="file" id="fotoFile" accept="image/*,application/pdf" multiple style="display:none" onchange="onFotoFileChange(this)">
-          <div class="file-btn" id="fotoFileBtn" onclick="document.getElementById('fotoFile').click()">Fotos o PDF</div>
+          <input type="file" id="fotoFile" accept="${ACCEPT_ARCHIVOS}" multiple style="display:none" onchange="onFotoFileChange(this)">
+          <div class="file-btn" id="fotoFileBtn" onclick="document.getElementById('fotoFile').click()">Foto, PDF, Word o Excel</div>
         </div>
         <button class="btn btn-primary btn-sm" onclick="addFoto()">Agregar</button>
       </div>
@@ -1085,18 +1202,18 @@ function tplFotos(){
       </div>
       ${fotos.length===0 ? '<div class="empty-mini">Sin fotos cargadas todavía.</div>' : `<div class="photo-grid">${fotos.map(f=>`
         <div class="photo-item">
-          ${f.fileType==='pdf'?`<a href="${f.fileData}" target="_blank" class="pdf-tile">PDF</a>`:`<img src="${f.fileData}" loading="lazy" decoding="async">`}
+          ${previewTile(f)}
           <div class="${readerMode?'hidden':''}">
             <button class="edt" onclick="editFotoDesc('${f.id}')">✎</button>
             <button class="del" onclick="delFoto('${f.id}')">✕</button>
           </div>
-          <div class="cap">${f.desc||formatDate(f.fecha)}</div>
+          <div class="cap">${f.desc||f.fileName||formatDate(f.fecha)}</div>
         </div>`).join('')}</div>`}
     </div>`;
 }
 function onFotoFileChange(input){
   const btn = document.getElementById('fotoFileBtn');
-  btn.textContent = input.files.length>1 ? (input.files.length+' archivos seleccionados') : (input.files[0] ? input.files[0].name : 'Fotos o PDF');
+  btn.textContent = input.files.length>1 ? (input.files.length+' archivos seleccionados') : (input.files[0] ? input.files[0].name : 'Foto, PDF, Word o Excel');
   btn.classList.toggle('has-file', !!input.files.length);
 }
 async function addFoto(){
@@ -1106,19 +1223,19 @@ async function addFoto(){
   const uploaded = await uploadMultiple(fileInput.files, 1600, 0.85);
   if(!uploaded.length) return;
   uploaded.forEach((res,i)=>{
-    currentData.fotos.push({id: cryptoId(), desc: uploaded.length>1 ? (desc?`${desc} (${i+1})`:'') : desc, fileData: res.fileData, fileType: res.fileType, fecha: todayISO()});
+    currentData.fotos.push({id: cryptoId(), desc: uploaded.length>1 ? (desc?`${desc} (${i+1})`:'') : desc, fileData: res.fileData, fileType: res.fileType, fileName: res.fileName, ext: res.ext, fecha: todayISO()});
   });
   logHistorial(uploaded.length+' foto(s)/archivo(s) agregado(s) al vehículo'+(desc?(': '+desc):''));
   await saveCurrentFicha(); renderTab();
 }
 async function addFotosFolder(input){
-  const files = Array.from(input.files || []).filter(f => f.type.startsWith('image/') || isPdfFile(f));
-  if(files.length===0){ alert('No se encontraron imágenes o PDFs en esa carpeta.'); return; }
+  const files = Array.from(input.files || []).filter(f => f.type.startsWith('image/') || isPdfFile(f) || isOfficeFile(f));
+  if(files.length===0){ alert('No se encontraron imágenes, PDFs ni documentos en esa carpeta.'); return; }
   let added = 0;
   for(const f of files){
     try{
       const res = await handleUpload(f, FOTO_ANCHO, FOTO_CALIDAD);
-      if(res){ currentData.fotos.push({id: cryptoId(), desc: f.name, fileData: res.fileData, fileType: res.fileType, fecha: todayISO()}); added++; }
+      if(res){ currentData.fotos.push({id: cryptoId(), desc: f.name, fileData: res.fileData, fileType: res.fileType, fileName: res.fileName, ext: res.ext, fecha: todayISO()}); added++; }
     }catch(e){}
   }
   logHistorial(added+' foto(s)/archivo(s) cargados desde carpeta');
@@ -1142,7 +1259,7 @@ function tplRegistros(){
       <div class="section-head"><h3>${editing?'Editar registro':'Nuevo registro'}</h3></div>
       <div class="field" style="max-width:220px;"><label>Tipo</label>
         <select id="regTipo" onchange="renderRegFields(this.value)">
-          <option value="uso" ${tipo==='uso'?'selected':''}>Uso / alquiler</option>
+          <option value="uso" ${tipo==='uso'?'selected':''}>Alquiler</option>
           <option value="mantenimiento" ${tipo==='mantenimiento'?'selected':''}>Mantenimiento</option>
         </select>
       </div>
@@ -1156,12 +1273,15 @@ function tplRegistros(){
       <tbody>${regs.map(r=>regRow(r)).join('')}</tbody></table>`}
     </div>`;
 }
+function tipoLabel(t){ return t==='uso' ? 'Alquiler' : (t==='mantenimiento' ? 'Mantenimiento' : t); }
 function regRow(r){
   let periodo = '';
   let detalle = '';
   if(r.tipo==='uso'){
     periodo = formatDate(r.fechaInicio) + ' → ' + (r.enCurso ? '<b style="color:#946200;">continúa alquilada</b>' : (r.fechaFin?formatDate(r.fechaFin):'—'));
     detalle = [r.cliente&&('Cliente: '+r.cliente), r.rubro&&('Rubro: '+r.rubro), (r.kmInicio||r.kmFin)&&('Km: '+(r.kmInicio||'-')+' → '+(r.kmFin||'-'))].filter(Boolean).join(' · ');
+    if(r.checklist) detalle += ' · 📋 Check List';
+    if(r.fotos && r.fotos.length) detalle += ' · 📷 '+r.fotos.length;
   } else {
     periodo = formatDate(r.fecha);
     detalle = r.detalle||'';
@@ -1170,7 +1290,7 @@ function regRow(r){
   }
   return `<tr>
     <td>${periodo}</td>
-    <td><span class="tag tag-${r.tipo==='uso'?'uso':r.tipo==='mantenimiento'?'mant':'inc'}">${r.tipo}</span></td>
+    <td><span class="tag tag-${r.tipo==='uso'?'uso':r.tipo==='mantenimiento'?'mant':'inc'}">${tipoLabel(r.tipo)}</span></td>
     <td>${detalle}</td>
     <td class="${readerMode?'hidden':''}"><button class="icon-btn" onclick="editRegistro('${r.id}')">Editar</button> <button class="icon-btn danger" onclick="delRegistro('${r.id}')">Eliminar</button></td>
   </tr>`;
@@ -1200,7 +1320,8 @@ function renderRegFields(tipo, editingObj){
         <div class="field"><label>Fecha fin</label><input type="date" id="regFFin" value="${e&&e.fechaFin||''}" ${e&&e.enCurso?'disabled':''}></div>
         <div class="field"><label>Km fin</label><input type="number" id="regKmFin" placeholder="Ej: 13800" value="${e&&e.kmFin||''}"></div>
       </div>
-      <div class="field"><label>Notas (ej: lugar de entrega — sede de la empresa, operación en el campo, aeropuerto, etc.)</label><textarea id="regNotas" placeholder="Notas adicionales sobre este período de alquiler">${e&&e.notas||''}</textarea></div>`;
+      <div class="field"><label>Notas (ej: lugar de entrega — sede de la empresa, operación en el campo, aeropuerto, etc.)</label><textarea id="regNotas" placeholder="Notas adicionales sobre este período de alquiler">${e&&e.notas||''}</textarea></div>
+      <div id="alqExtrasWrap">${alqExtrasHTML()}</div>`;
   } else {
     wrap.innerHTML = `
       <div class="grid2">
@@ -1213,29 +1334,68 @@ function renderRegFields(tipo, editingObj){
 function mantExtrasHTML(){
   return `
     <div class="field"><label>Fotos (antes / después)</label>
-      <input type="file" id="mantFotoInput" accept="image/*,application/pdf" multiple style="display:none" onchange="addMantFoto(this)">
-      <button type="button" class="file-btn" onclick="document.getElementById('mantFotoInput').click()">+ Agregar fotos o PDF</button>
-      <div class="photo-grid" style="margin-top:8px;">${regMantFotos.map((f,i)=>`<div class="photo-item">${f.fileType==='pdf'?`<a href="${f.fileData}" target="_blank" class="pdf-tile">PDF</a>`:`<img src="${f.fileData}" loading="lazy" decoding="async">`}<button class="del" onclick="delMantFoto(${i})">✕</button><div class="cap">${f.desc||''}</div></div>`).join('')}</div>
+      <input type="file" id="mantFotoInput" accept="${ACCEPT_ARCHIVOS}" multiple style="display:none" onchange="addMantFoto(this)">
+      <button type="button" class="file-btn" onclick="document.getElementById('mantFotoInput').click()">+ Agregar foto, PDF, Word o Excel</button>
+      <div class="photo-grid" style="margin-top:8px;">${regMantFotos.map((f,i)=>`<div class="photo-item">${previewTile(f)}<button class="del" onclick="delMantFoto(${i})">✕</button><div class="cap">${f.desc||f.fileName||''}</div></div>`).join('')}</div>
     </div>
     <div class="field"><label>Archivos (factura, autorización, etc.)</label>
-      <input type="file" id="mantArchivoInput" accept="image/*,application/pdf" multiple style="display:none" onchange="addMantArchivo(this)">
+      <input type="file" id="mantArchivoInput" accept="${ACCEPT_ARCHIVOS}" multiple style="display:none" onchange="addMantArchivo(this)">
       <button type="button" class="file-btn" onclick="document.getElementById('mantArchivoInput').click()">+ Agregar archivo</button>
-      <div class="photo-grid" style="margin-top:8px;">${regMantArchivos.map((f,i)=>`<div class="photo-item">${f.fileType==='pdf'?`<a href="${f.fileData}" target="_blank" class="pdf-tile">PDF</a>`:`<img src="${f.fileData}" loading="lazy" decoding="async">`}<button class="del" onclick="delMantArchivo(${i})">✕</button><div class="cap">${f.desc||''}</div></div>`).join('')}</div>
+      <div class="photo-grid" style="margin-top:8px;">${regMantArchivos.map((f,i)=>`<div class="photo-item">${previewTile(f)}<button class="del" onclick="delMantArchivo(${i})">✕</button><div class="cap">${f.desc||f.fileName||''}</div></div>`).join('')}</div>
     </div>`;
 }
 function renderMantExtras(){ const wrap = document.getElementById('mantExtrasWrap'); if(wrap) wrap.innerHTML = mantExtrasHTML(); }
 async function addMantFoto(input){
   if(!input.files.length) return;
-  for(const f of input.files){ const res = await handleUpload(f, FOTO_ANCHO, FOTO_CALIDAD); if(res) regMantFotos.push({desc:f.name, fileData:res.fileData, fileType:res.fileType}); }
+  for(const f of input.files){ const res = await handleUpload(f, FOTO_ANCHO, FOTO_CALIDAD); if(res) regMantFotos.push({desc:f.name, fileData:res.fileData, fileType:res.fileType, fileName:res.fileName, ext:res.ext}); }
   input.value=''; renderMantExtras();
 }
 function delMantFoto(idx){ regMantFotos.splice(idx,1); renderMantExtras(); }
 async function addMantArchivo(input){
   if(!input.files.length) return;
-  for(const f of input.files){ const res = await handleUpload(f, FOTO_ANCHO, FOTO_CALIDAD); if(res) regMantArchivos.push({desc:f.name, fileData:res.fileData, fileType:res.fileType}); }
+  for(const f of input.files){ const res = await handleUpload(f, FOTO_ANCHO, FOTO_CALIDAD); if(res) regMantArchivos.push({desc:f.name, fileData:res.fileData, fileType:res.fileType, fileName:res.fileName, ext:res.ext}); }
   input.value=''; renderMantExtras();
 }
 function delMantArchivo(idx){ regMantArchivos.splice(idx,1); renderMantExtras(); }
+
+/* ---------- Extras del ALQUILER: Check List (con luz) + fotos ---------- */
+function alqExtrasHTML(){
+  const tieneCheck = !!(regAlqChecklist && regAlqChecklist.fileData);
+  const luz = tieneCheck
+    ? `<span class="check-light ok"><span class="dot"></span>Check List cargado ✓</span>`
+    : `<span class="check-light miss"><span class="dot"></span>Falta cargar el Check List</span>`;
+  const checkTile = tieneCheck
+    ? `<div class="photo-grid" style="margin-top:8px;"><div class="photo-item">${previewTile(regAlqChecklist)}<button class="del" onclick="delAlqChecklist()">✕</button><div class="cap">${regAlqChecklist.fileName||'Check List'}</div></div></div>`
+    : '';
+  return `
+    <div class="field">
+      <label style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+        <span>Check List del alquiler</span>${luz}
+      </label>
+      <input type="file" id="alqCheckInput" accept="${ACCEPT_ARCHIVOS}" style="display:none" onchange="addAlqChecklist(this)">
+      <button type="button" class="file-btn ${tieneCheck?'has-file':''}" onclick="document.getElementById('alqCheckInput').click()">${tieneCheck?'Reemplazar Check List':'+ Agregar Check List (foto, PDF, Word o Excel)'}</button>
+      ${checkTile}
+    </div>
+    <div class="field"><label>Fotos del alquiler</label>
+      <input type="file" id="alqFotoInput" accept="${ACCEPT_ARCHIVOS}" multiple style="display:none" onchange="addAlqFoto(this)">
+      <button type="button" class="file-btn" onclick="document.getElementById('alqFotoInput').click()">+ Agregar foto, PDF, Word o Excel</button>
+      <div class="photo-grid" style="margin-top:8px;">${regAlqFotos.map((f,i)=>`<div class="photo-item">${previewTile(f)}<button class="del" onclick="delAlqFoto(${i})">✕</button><div class="cap">${f.desc||f.fileName||''}</div></div>`).join('')}</div>
+    </div>`;
+}
+function renderAlqExtras(){ const wrap = document.getElementById('alqExtrasWrap'); if(wrap) wrap.innerHTML = alqExtrasHTML(); }
+async function addAlqChecklist(input){
+  if(!input.files.length) return;
+  const res = await handleUpload(input.files[0], FOTO_ANCHO, FOTO_CALIDAD);
+  if(res) regAlqChecklist = {desc:input.files[0].name, fileData:res.fileData, fileType:res.fileType, fileName:res.fileName, ext:res.ext};
+  input.value=''; renderAlqExtras();
+}
+function delAlqChecklist(){ regAlqChecklist = null; renderAlqExtras(); }
+async function addAlqFoto(input){
+  if(!input.files.length) return;
+  for(const f of input.files){ const res = await handleUpload(f, FOTO_ANCHO, FOTO_CALIDAD); if(res) regAlqFotos.push({desc:f.name, fileData:res.fileData, fileType:res.fileType, fileName:res.fileName, ext:res.ext}); }
+  input.value=''; renderAlqExtras();
+}
+function delAlqFoto(idx){ regAlqFotos.splice(idx,1); renderAlqExtras(); }
 
 function collectRegForm(){
   const tipo = document.getElementById('regTipo').value;
@@ -1243,7 +1403,8 @@ function collectRegForm(){
     return { tipo, cliente:document.getElementById('regCliente').value, cuit:document.getElementById('regCuit').value, rubro:document.getElementById('regRubro').value,
       fechaInicio:document.getElementById('regFInicio').value,
       enCurso:document.getElementById('regEnCurso').checked, fechaFin:document.getElementById('regEnCurso').checked?'':document.getElementById('regFFin').value,
-      kmInicio:document.getElementById('regKmInicio').value, kmFin:document.getElementById('regKmFin').value, notas:document.getElementById('regNotas').value };
+      kmInicio:document.getElementById('regKmInicio').value, kmFin:document.getElementById('regKmFin').value, notas:document.getElementById('regNotas').value,
+      checklist: regAlqChecklist || null, fotos: [...regAlqFotos] };
   }
   const base = { tipo, fecha:document.getElementById('regFecha').value, detalle:document.getElementById('regDetalle').value };
   if(tipo==='mantenimiento'){ base.fotos = [...regMantFotos]; base.archivos = [...regMantArchivos]; }
@@ -1254,18 +1415,18 @@ async function addRegistro(){
   if(data.tipo==='uso' && !data.cliente){ alert('Indicá el cliente.'); return; }
   if(data.tipo!=='uso' && !data.detalle){ alert('Cargá un detalle.'); return; }
   currentData.registros.push({id: cryptoId(), ...data});
-  logHistorial('Registro de '+data.tipo+' agregado');
-  regMantFotos=[]; regMantArchivos=[];
+  logHistorial('Registro de '+tipoLabel(data.tipo)+' agregado');
+  regMantFotos=[]; regMantArchivos=[]; regAlqChecklist=null; regAlqFotos=[];
   await saveCurrentFicha(); renderTab();
 }
 function editRegistro(id){ editingRegId = id; renderTab(); }
-function cancelRegEdit(){ editingRegId = null; regMantFotos=[]; regMantArchivos=[]; renderTab(); }
+function cancelRegEdit(){ editingRegId = null; regMantFotos=[]; regMantArchivos=[]; regAlqChecklist=null; regAlqFotos=[]; renderTab(); }
 async function saveRegEdit(){
   const data = collectRegForm();
   const idx = currentData.registros.findIndex(r=>r.id===editingRegId);
   currentData.registros[idx] = {id: editingRegId, ...data};
-  logHistorial('Registro de '+data.tipo+' editado');
-  editingRegId = null; regMantFotos=[]; regMantArchivos=[];
+  logHistorial('Registro de '+tipoLabel(data.tipo)+' editado');
+  editingRegId = null; regMantFotos=[]; regMantArchivos=[]; regAlqChecklist=null; regAlqFotos=[];
   await saveCurrentFicha(); renderTab();
 }
 function delRegistro(id){
@@ -1367,7 +1528,7 @@ function openExportModal(){
       <div class="checkline"><input type="checkbox" id="expContratos" checked> <label style="margin:0;">Contrato / Legales</label></div>
       <div class="checkline"><input type="checkbox" id="expSiniestros" checked> <label style="margin:0;">Siniestros</label></div>
       <div class="checkline"><input type="checkbox" id="expFotos" checked> <label style="margin:0;">Fotos</label></div>
-      <div class="checkline"><input type="checkbox" id="expRegistros" checked> <label style="margin:0;">Registro de uso y mantenimiento</label></div>
+      <div class="checkline"><input type="checkbox" id="expRegistros" checked> <label style="margin:0;">Alquileres / Mantenimiento</label></div>
       <div class="checkline"><input type="checkbox" id="expHistorial"> <label style="margin:0;">Historial de modificaciones</label></div>
       <button class="btn btn-primary" style="width:100%; justify-content:center; margin-top:14px;" onclick="exportarPDF()">⭳ Generar PDF</button>
     </div></div>`);
@@ -1384,6 +1545,18 @@ function simpleHash(str){
 
 function fitImage(doc, item, x, y, maxW, maxH){
   if(!item || !item.fileData || item.fileType==='pdf') return {w:0,h:0,drawn:false};
+  if(item.fileType==='office'){
+    // Word / Excel: no se pueden dibujar; se deja constancia por nombre.
+    const k = officeKind(item.ext||item.fileName);
+    doc.setDrawColor(214,218,225); doc.setFillColor(238,243,248);
+    doc.roundedRect(x, y, maxW, maxH, 4, 4, 'FD');
+    doc.setFont('helvetica','bold'); doc.setFontSize(Math.min(8, maxW/7)); doc.setTextColor(44,110,155);
+    doc.text(k==='excel'?'EXCEL':'WORD', x+maxW/2, y+maxH/2-3, {align:'center'});
+    doc.setFont('helvetica','normal'); doc.setFontSize(5);
+    const nm = doc.splitTextToSize(item.fileName||'archivo', maxW-6);
+    doc.text(nm.slice(0,2), x+maxW/2, y+maxH/2+6, {align:'center'});
+    return {w:maxW,h:maxH,drawn:true};
+  }
   try{
     const props = doc.getImageProperties(item.fileData);
     const ratio = Math.min(maxW/props.width, maxH/props.height);
@@ -1473,6 +1646,16 @@ async function exportarPDF(){
         doc.setFont('helvetica','normal'); doc.setFontSize(6);
         doc.text('Ver Anexo', tx+tw/2, y+th/2+8, {align:'center'});
         if(it.fileData) registrarAdjuntoPdf(it, meta);
+      } else if(it.fileType==='office'){
+        // Word / Excel no se pueden convertir en hojas: se listan por nombre.
+        const k = officeKind(it.ext||it.fileName);
+        doc.setDrawColor(214,218,225); doc.setFillColor(238,243,248);
+        doc.roundedRect(tx, y, tw, th, 4, 4, 'FD');
+        doc.setFont('helvetica','bold'); doc.setFontSize(8); doc.setTextColor(44,110,155);
+        doc.text(k==='excel'?'EXCEL':'WORD', tx+tw/2, y+th/2-4, {align:'center'});
+        doc.setFont('helvetica','normal'); doc.setFontSize(5);
+        const nm = doc.splitTextToSize(it.fileName||'archivo', tw-6);
+        doc.text(nm.slice(0,2), tx+tw/2, y+th/2+6, {align:'center'});
       } else {
         fitImage(doc, it, tx, y, tw, th);
         doc.setDrawColor(214,218,225); doc.rect(tx, y, tw, th);
@@ -1656,13 +1839,13 @@ async function exportarPDF(){
     }
 
     if(incl.registros){
-      heading('Registro de uso y mantenimiento', 12.5);
+      heading('Alquileres / Mantenimiento', 12.5);
       const regs = [...ficha.registros].sort((a,b)=> (b.fechaInicio||b.fecha||'').localeCompare(a.fechaInicio||a.fecha||''));
       if(regs.length===0) writeText('Sin registros cargados.', margin, pageW-margin*2);
       for(const r of regs){
         ensureSpace(20);
         doc.setFont('helvetica','bold'); doc.setFontSize(8.5); doc.setTextColor(232,89,12);
-        doc.text(`[${r.tipo.toUpperCase()}]`, margin, y);
+        doc.text(`[${tipoLabel(r.tipo).toUpperCase()}]`, margin, y);
         let txt = '';
         if(r.tipo==='uso'){
           txt = `${formatDate(r.fechaInicio)} -> ${r.enCurso?'continua alquilada':(r.fechaFin?formatDate(r.fechaFin):'-')} - ${r.cliente||''}`;
@@ -1681,6 +1864,17 @@ async function exportarPDF(){
         y += Math.max(16, lines.length*12+4);
         if(r.tipo==='mantenimiento'){
           thumbRow([...(r.fotos||[]), ...(r.archivos||[])], margin+78, {patente: v.patente, label: 'Mantenimiento — '+formatDate(r.fecha)});
+        }
+        if(r.tipo==='uso'){
+          // Estado del Check List + sus archivos y fotos.
+          doc.setFont('helvetica','normal'); doc.setFontSize(8.5);
+          if(r.checklist && r.checklist.fileData){ doc.setTextColor(30,123,69); doc.text('Check List: cargado', margin+78, y); }
+          else { doc.setTextColor(178,58,27); doc.text('Check List: sin cargar', margin+78, y); }
+          y += 13;
+          const alqItems = [];
+          if(r.checklist && r.checklist.fileData) alqItems.push(r.checklist);
+          if(r.fotos && r.fotos.length) alqItems.push(...r.fotos);
+          thumbRow(alqItems, margin+78, {patente: v.patente, label: 'Alquiler'+(r.cliente?(' — '+r.cliente):'')+' — '+formatDate(r.fechaInicio)});
         }
       }
       line();

@@ -311,12 +311,15 @@ function quitarTempDeDrive(item, editandoId){
 function fileUrl(item, kind){
   if(!item) return '';
   if(item.fileId){
-    // Se pide el archivo a través del propio backend (Apps Script) en vez de
-    // a Drive directamente. Así funciona siempre, para cualquier visitante,
-    // sin depender de que el enlace "cualquiera con el enlace" de Drive sea
-    // realmente público (algunos dominios de Google Workspace lo restringen
-    // aunque en la pantalla de compartir se vea configurado como abierto).
-    return `${APPS_SCRIPT_URL}?action=file&fileId=${item.fileId}`;
+    // Si ya lo bajamos antes por la API, usamos la copia guardada (instantáneo).
+    if(_driveCache[item.fileId]) return _driveCache[item.fileId];
+    // Intentamos el CDN de Google (lh3), que suele funcionar mejor que
+    // drive.google.com/thumbnail para archivos compartidos. Si falla,
+    // imgFallback() se encarga de probar otras opciones y finalmente la API.
+    if(kind==='img')     return `https://lh3.googleusercontent.com/d/${item.fileId}=w400`;
+    if(kind==='imgBig')  return `https://lh3.googleusercontent.com/d/${item.fileId}=s1600`;
+    if(kind==='pdf')     return `https://drive.google.com/file/d/${item.fileId}/preview`;
+    return `https://drive.google.com/uc?export=download&id=${item.fileId}`;
   }
   return item.fileData || '';
 }
@@ -324,11 +327,35 @@ function fileUrl(item, kind){
 // Si la miniatura de Drive todavía no está lista (recién subida), se reintenta
 // una vez por el otro CDN de Google antes de darse por vencida.
 function imgFallback(img){
-  if(img.dataset.fb) return;
   const fid = img.dataset.fid;
-  if(!fid){ return; }
-  img.dataset.fb = '1';
-  img.src = `https://lh3.googleusercontent.com/d/${fid}=w600`;
+  if(!fid) return;
+  const step = parseInt(img.dataset.fb || '0');
+
+  if(step === 0){
+    // Paso 1: el CDN lh3 falló → probamos drive.google.com/thumbnail
+    img.dataset.fb = '1';
+    img.src = `https://drive.google.com/thumbnail?id=${fid}&sz=w400`;
+    return;
+  }
+
+  if(step === 1){
+    // Paso 2: los dos enlaces públicos fallaron (probablemente restricción del
+    // dominio de Google Workspace). Traemos el archivo por la API del backend
+    // (action=getFile), que SIEMPRE funciona porque el script es el dueño.
+    img.dataset.fb = '2';
+    if(_driveCache[fid]){ img.src = _driveCache[fid]; return; }
+    img.style.opacity = '0.4';
+    fetchConLimite(`${APPS_SCRIPT_URL}?action=getFile&fileId=${encodeURIComponent(fid)}`, null, TIMEOUT_GUARDADO_MS)
+      .then(r => r.json())
+      .then(d => {
+        if(d && d.fileData){
+          _driveCache[fid] = d.fileData;
+          img.src = d.fileData;
+          img.style.opacity = '';
+        }
+      }).catch(() => { img.style.opacity = ''; });
+  }
+  // step >= 2: ya se intentó todo, no insistimos
 }
 
 /* ===== Tiempo límite para la red =====
@@ -378,8 +405,28 @@ const storageAdapter = {
     }
     try{ localStorage.setItem('geofleet_v1_'+key, value); return {key, value, shared: !!shared}; }
     catch(e){ console.error('Error guardando localmente', key, e); return null; }
+  },
+  async delete(key, shared){
+    if(hasCloudBackend){
+      try{
+        const res = await fetchConLimite(APPS_SCRIPT_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify({ action: 'delete', key })
+        }, TIMEOUT_GUARDADO_MS);
+        return await res.json();
+      }catch(e){ console.error('Error borrando', key, e); return null; }
+    }
+    try{ localStorage.removeItem('geofleet_v1_'+key); return {deleted: true}; }
+    catch(e){ return null; }
   }
 };
+
+/* ===== Caché de archivos de Drive =====
+   Cuando un enlace directo de Drive no funciona (por restricciones del dominio),
+   la app trae el archivo vía la API (action=getFile) y lo guarda acá en memoria.
+   Así la segunda vez que se muestra la misma foto, no hay que volver a bajarlo. */
+const _driveCache = {};
 const DEFAULT_LOGO = "data:image/png;base64,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";
 let vehiculos = [];
 let current = null;
@@ -573,6 +620,59 @@ async function saveVehiculosList(){
   renderVehList();
 }
 
+async function deleteVehicle(){
+  if(readerMode || !current) return;
+  const v = vehInfo();
+  const nombre = `${v.marca||''} ${v.modelo||''} (${v.patente})`.trim();
+
+  // Primera confirmación
+  if(!confirm(`¿Estás seguro de eliminar la camioneta ${nombre}?\n\nSe borrarán TODOS los datos, fotos, documentos y archivos asociados.\n\nEsta acción NO se puede deshacer.`)) return;
+
+  // Segunda confirmación: pedir que escriba la patente
+  const texto = prompt(`Para confirmar, escribí la patente "${v.patente}":`);
+  if(!texto || texto.trim().toUpperCase() !== v.patente){
+    alert('La patente no coincide. No se eliminó nada.');
+    return;
+  }
+
+  // Borrar los archivos de Drive asociados a la ficha
+  if(currentData){
+    const items = [];
+    const add = x => { if(x && x.fileId) items.push(x.fileId); };
+    const walkArr = arr => (arr||[]).forEach(add);
+    // Fotos sueltas
+    walkArr(currentData.fotos);
+    // Documentos
+    (currentData.documentos||[]).forEach(d => { add(d); walkArr(d.extraFotos); });
+    // Contratos
+    (currentData.contratos||[]).forEach(d => { add(d); walkArr(d.extraFotos); });
+    // Seguros
+    if(currentData.seguros){ add(currentData.seguros.libreDeuda); add(currentData.seguros.certificado); add(currentData.seguros.poliza); }
+    // Registros (alquileres/mantenimiento)
+    (currentData.registros||[]).forEach(r => { walkArr(r.fotos); walkArr(r.archivos); add(r.checklist); });
+    // Siniestros
+    (currentData.siniestros||[]).forEach(s => { walkArr(s.fotos); walkArr(s.comprobantesPago); walkArr(s.copiasInfraccion); });
+    items.forEach(borrarArchivoDeDrive);
+  }
+
+  // Borrar la ficha de la planilla
+  storageAdapter.delete('ficha:' + v.patente, false).catch(()=>{});
+
+  // Sacar de la lista de vehículos
+  vehiculos = vehiculos.filter(x => x.patente !== current);
+  current = null;
+  currentData = null;
+  await saveVehiculosList();
+
+  const mainEl = document.getElementById('main');
+  if(mainEl){
+    mainEl.innerHTML = `<div class="empty-state">
+      <h2>Camioneta eliminada</h2>
+      <p>Se eliminó ${nombre} y todos sus datos asociados. Seleccioná otra camioneta de la lista o agregá una nueva.</p>
+    </div>`;
+  }
+}
+
 async function selectVehicle(patente){
   const isNew = !vehiculos.find(v=>v.patente===patente) ? false : true;
   current = patente; activeTab = 'datos'; editingDocId = null; editingRegId = null; editingContratoId = null; editingSiniestroId = null;
@@ -629,8 +729,9 @@ function renderMain(){
         <div class="plate-badge"><div class="strip">RA</div><div class="num">${v.patente}</div></div>
         <div class="veh-title-text"><b>${v.marca||'Sin marca'} ${v.modelo||''}${v.estado==='vendido'?'<span class="badge-vendido">Vendida</span>':''}</b><span>${v.anio?('Año '+v.anio):'Año no especificado'}</span></div>
       </div>
-      <div style="display:flex; gap:8px;" class="${readerMode?'hidden':''}">
+      <div style="display:flex; gap:8px; flex-wrap:wrap;" class="${readerMode?'hidden':''}">
         <button class="btn btn-primary" onclick="openExportModal()">⭳ Exportar a PDF</button>
+        <button class="btn" style="background:#E8483C; color:#fff;" onclick="deleteVehicle()">🗑 Eliminar camioneta</button>
       </div>
     </div>
     <div class="tabs">
@@ -772,7 +873,18 @@ function openFilePreview(f){
   if(f.fileType==='image'){
     inner = `<img src="${fileUrl(f,'imgBig')}" data-fid="${f.fileId||''}" onerror="imgFallback(this)" style="max-width:100%; max-height:72vh; display:block; margin:0 auto; border-radius:6px;">`;
   } else if(f.fileType==='pdf'){
-    inner = `<iframe src="${fileUrl(f,'pdf')}" style="width:100%; height:72vh; border:1px solid var(--line); border-radius:6px;"></iframe>`;
+    if(f.fileId){
+      // Para PDF de Drive: traemos el archivo por la API y lo mostramos como
+      // blob, evitando depender del enlace público (que a veces no funciona).
+      inner = `<div id="pdfLoadWrap" style="text-align:center; padding:40px; color:var(--muted);">
+        <div style="font-size:28px; margin-bottom:10px;">📄</div>Cargando PDF…</div>`;
+      document.getElementById('filePreviewTitle').textContent = name;
+      document.getElementById('filePreviewBody').innerHTML = inner;
+      document.getElementById('filePreviewOverlay').style.display = 'flex';
+      loadDrivePdf(f.fileId, name);
+      return;
+    }
+    inner = `<iframe src="${f.fileData||''}" style="width:100%; height:72vh; border:1px solid var(--line); border-radius:6px;"></iframe>`;
   } else {
     // Word / Excel: el navegador no los muestra; se ofrece descargar/abrir.
     const k = officeKind(f.ext || f.fileName || name);
@@ -786,6 +898,30 @@ function openFilePreview(f){
   document.getElementById('filePreviewTitle').textContent = name;
   document.getElementById('filePreviewBody').innerHTML = inner;
   document.getElementById('filePreviewOverlay').style.display = 'flex';
+}
+async function loadDrivePdf(fileId, name){
+  const body = document.getElementById('filePreviewBody');
+  try{
+    const res = await fetchConLimite(`${APPS_SCRIPT_URL}?action=getFile&fileId=${encodeURIComponent(fileId)}`, null, TIMEOUT_GUARDADO_MS);
+    const data = await res.json();
+    if(data && data.fileData){
+      const m = /^data:([^;]+);base64,(.*)$/.exec(data.fileData);
+      if(m){
+        const raw = atob(m[2]);
+        const arr = new Uint8Array(raw.length);
+        for(let i=0;i<raw.length;i++) arr[i]=raw.charCodeAt(i);
+        const blob = new Blob([arr], {type: m[1]});
+        const blobUrl = URL.createObjectURL(blob);
+        if(body) body.innerHTML = `<iframe src="${blobUrl}" style="width:100%; height:72vh; border:1px solid var(--line); border-radius:6px;"></iframe>`;
+        return;
+      }
+    }
+    if(body) body.innerHTML = `<div style="text-align:center; padding:32px; color:var(--muted);">No se pudo cargar el PDF.<br>
+      <a href="https://drive.google.com/file/d/${fileId}/view" target="_blank" class="btn btn-primary" style="margin-top:14px;">Abrir en Drive</a></div>`;
+  }catch(e){
+    if(body) body.innerHTML = `<div style="text-align:center; padding:32px; color:var(--muted);">Error de conexión al cargar el PDF.<br>
+      <a href="https://drive.google.com/file/d/${fileId}/view" target="_blank" class="btn btn-primary" style="margin-top:14px;">Abrir en Drive</a></div>`;
+  }
 }
 function closeFilePreview(){
   document.getElementById('filePreviewOverlay').style.display = 'none';

@@ -1484,7 +1484,7 @@ async function addFoto(){
   const uploaded = await uploadMultiple(fileInput.files, 1600, 0.85);
   if(!uploaded.length) return;
   uploaded.forEach((res,i)=>{
-    currentData.fotos.push({id: cryptoId(), desc: uploaded.length>1 ? (desc?`${desc} (${i+1})`:'') : desc, fileData: res.fileData, fileType: res.fileType, fileName: res.fileName, ext: res.ext, fecha: todayISO()});
+    currentData.fotos.push({id: cryptoId(), desc: uploaded.length>1 ? (desc?`${desc} (${i+1})`:'') : desc, fileData: res.fileData, fileId: res.fileId, fileType: res.fileType, fileName: res.fileName, ext: res.ext, fecha: todayISO()});
   });
   logHistorial(uploaded.length+' foto(s)/archivo(s) agregado(s) al vehículo'+(desc?(': '+desc):''));
   await saveCurrentFicha(); renderTab();
@@ -1496,7 +1496,7 @@ async function addFotosFolder(input){
   for(const f of files){
     try{
       const res = await handleUpload(f, FOTO_ANCHO, FOTO_CALIDAD);
-      if(res){ currentData.fotos.push({id: cryptoId(), desc: f.name, fileData: res.fileData, fileType: res.fileType, fileName: res.fileName, ext: res.ext, fecha: todayISO()}); added++; }
+      if(res){ currentData.fotos.push({id: cryptoId(), desc: f.name, fileData: res.fileData, fileId: res.fileId, fileType: res.fileType, fileName: res.fileName, ext: res.ext, fecha: todayISO()}); added++; }
     }catch(e){}
   }
   logHistorial(added+' foto(s)/archivo(s) cargados desde carpeta');
@@ -1608,13 +1608,13 @@ function mantExtrasHTML(){
 function renderMantExtras(){ const wrap = document.getElementById('mantExtrasWrap'); if(wrap) wrap.innerHTML = mantExtrasHTML(); }
 async function addMantFoto(input){
   if(!input.files.length) return;
-  for(const f of input.files){ const res = await handleUpload(f, FOTO_ANCHO, FOTO_CALIDAD); if(res) regMantFotos.push({desc:f.name, fileData:res.fileData, fileType:res.fileType, fileName:res.fileName, ext:res.ext}); }
+  for(const f of input.files){ const res = await handleUpload(f, FOTO_ANCHO, FOTO_CALIDAD); if(res) regMantFotos.push({desc:f.name, fileData:res.fileData, fileId:res.fileId, fileType:res.fileType, fileName:res.fileName, ext:res.ext}); }
   input.value=''; renderMantExtras();
 }
 function delMantFoto(idx){ quitarTempDeDrive(regMantFotos[idx], editingRegId); regMantFotos.splice(idx,1); renderMantExtras(); }
 async function addMantArchivo(input){
   if(!input.files.length) return;
-  for(const f of input.files){ const res = await handleUpload(f, FOTO_ANCHO, FOTO_CALIDAD); if(res) regMantArchivos.push({desc:f.name, fileData:res.fileData, fileType:res.fileType, fileName:res.fileName, ext:res.ext}); }
+  for(const f of input.files){ const res = await handleUpload(f, FOTO_ANCHO, FOTO_CALIDAD); if(res) regMantArchivos.push({desc:f.name, fileData:res.fileData, fileId:res.fileId, fileType:res.fileType, fileName:res.fileName, ext:res.ext}); }
   input.value=''; renderMantExtras();
 }
 function delMantArchivo(idx){ quitarTempDeDrive(regMantArchivos[idx], editingRegId); regMantArchivos.splice(idx,1); renderMantExtras(); }
@@ -1647,13 +1647,13 @@ function renderAlqExtras(){ const wrap = document.getElementById('alqExtrasWrap'
 async function addAlqChecklist(input){
   if(!input.files.length) return;
   const res = await handleUpload(input.files[0], FOTO_ANCHO, FOTO_CALIDAD);
-  if(res) regAlqChecklist = {desc:input.files[0].name, fileData:res.fileData, fileType:res.fileType, fileName:res.fileName, ext:res.ext};
+  if(res) regAlqChecklist = {desc:input.files[0].name, fileData:res.fileData, fileId:res.fileId, fileType:res.fileType, fileName:res.fileName, ext:res.ext};
   input.value=''; renderAlqExtras();
 }
 function delAlqChecklist(){ quitarTempDeDrive(regAlqChecklist, editingRegId); regAlqChecklist = null; renderAlqExtras(); }
 async function addAlqFoto(input){
   if(!input.files.length) return;
-  for(const f of input.files){ const res = await handleUpload(f, FOTO_ANCHO, FOTO_CALIDAD); if(res) regAlqFotos.push({desc:f.name, fileData:res.fileData, fileType:res.fileType, fileName:res.fileName, ext:res.ext}); }
+  for(const f of input.files){ const res = await handleUpload(f, FOTO_ANCHO, FOTO_CALIDAD); if(res) regAlqFotos.push({desc:f.name, fileData:res.fileData, fileId:res.fileId, fileType:res.fileType, fileName:res.fileName, ext:res.ext}); }
   input.value=''; renderAlqExtras();
 }
 function delAlqFoto(idx){ quitarTempDeDrive(regAlqFotos[idx], editingRegId); regAlqFotos.splice(idx,1); renderAlqExtras(); }

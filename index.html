@@ -230,6 +230,105 @@ const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbz1HT-w2zvFberX
 const hasCloudBackend = APPS_SCRIPT_URL && APPS_SCRIPT_URL.indexOf('https://') === 0;
 let usingLocalFallback = !hasCloudBackend;
 
+/* ===== INTERRUPTOR DE VUELTA ATRÁS =====
+   Con true, los archivos nuevos (fotos, PDF, Word, Excel) se guardan en Google
+   Drive (rápido). Si algo fallara, poné esto en false: la app vuelve a guardar
+   los archivos dentro de la planilla como antes (base64), sin tocar nada más.
+   Todo lo ya cargado sigue viéndose en ambos casos. */
+const USAR_DRIVE = true;
+
+// Sube un archivo a Drive a través del backend. Devuelve {fileId, fileName} o null.
+async function subirArchivoADrive(dataUrl, fileName){
+  if(!hasCloudBackend) return null;
+  const m = /^data:([^;]+);base64,(.*)$/.exec(dataUrl || '');
+  if(!m) return null;
+  const mimeType = m[1], dataBase64 = m[2];
+  try{
+    const res = await fetchConLimite(APPS_SCRIPT_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: 'uploadFile', fileName, mimeType, dataBase64 })
+    }, TIMEOUT_GUARDADO_MS);
+    const data = await res.json();
+    if(data && data.fileId) return data;
+    console.error('uploadFile sin fileId', data);
+    return null;
+  }catch(e){ console.error('Error subiendo a Drive', e); return null; }
+}
+
+// Borra un archivo de Drive (mejor esfuerzo; no frena nada si falla).
+function borrarArchivoDeDrive(fileId){
+  if(!hasCloudBackend || !fileId) return;
+  try{
+    fetchConLimite(`${APPS_SCRIPT_URL}?action=deleteFile&fileId=${encodeURIComponent(fileId)}`, null, TIMEOUT_LECTURA_MS).catch(()=>{});
+  }catch(e){}
+}
+
+// Junta todos los fileId (de Drive) que contiene uno o varios registros/ítems,
+// mirando todos los lugares posibles (archivo principal, fotos, adjuntos, etc.).
+function fileIdsDe(){
+  const ids = [];
+  const add = f => { if(f && f.fileId) ids.push(f.fileId); };
+  const walk = r => {
+    if(!r) return;
+    add(r);                                   // foto/documento/contrato: archivo principal
+    (r.extraFotos||[]).forEach(add);
+    (r.fotos||[]).forEach(add);
+    (r.archivos||[]).forEach(add);
+    (r.comprobantesPago||[]).forEach(add);
+    (r.copiasInfraccion||[]).forEach(add);
+    add(r.checklist);                          // alquiler
+  };
+  for(const r of arguments) walk(r);
+  return ids;
+}
+// Borra de Drive todos los archivos de un registro (al eliminarlo por completo).
+function borrarArchivosDe(){
+  fileIdsDe.apply(null, arguments).forEach(borrarArchivoDeDrive);
+}
+// Al editar: borra de Drive solo los archivos que estaban antes y ya no están.
+// Así nunca queda una miniatura rota; a lo sumo, un archivo huérfano inofensivo.
+function reconciliarBorrado(viejo, nuevo){
+  const antes = fileIdsDe(viejo);
+  const despues = new Set(fileIdsDe(nuevo));
+  antes.forEach(id => { if(!despues.has(id)) borrarArchivoDeDrive(id); });
+}
+// Cuando se saca un adjunto de un formulario con la ✕:
+//  - si se está CREANDO un registro nuevo (editandoId falsy), el archivo recién
+//    subido queda huérfano, así que se borra de Drive en el acto.
+//  - si se está EDITANDO uno ya guardado, NO se borra acá (de eso se encarga la
+//    reconciliación al guardar), para que "Cancelar" nunca rompa un archivo.
+function quitarTempDeDrive(item, editandoId){
+  if(!editandoId && item && item.fileId) borrarArchivoDeDrive(item.fileId);
+}
+
+// URL para mostrar un archivo. Si está en Drive usa su URL directa (rápida);
+// si es un archivo viejo (base64) usa el dato guardado. 'kind':
+//   img      -> miniatura de imagen (grilla)
+//   imgBig   -> imagen grande (visor)
+//   pdf      -> vista previa de PDF (iframe)
+//   download -> descargar / abrir
+function fileUrl(item, kind){
+  if(!item) return '';
+  if(item.fileId){
+    if(kind==='img')     return `https://drive.google.com/thumbnail?id=${item.fileId}&sz=w400`;
+    if(kind==='imgBig')  return `https://drive.google.com/thumbnail?id=${item.fileId}&sz=w1600`;
+    if(kind==='pdf')     return `https://drive.google.com/file/d/${item.fileId}/preview`;
+    return `https://drive.google.com/uc?export=download&id=${item.fileId}`;
+  }
+  return item.fileData || '';
+}
+
+// Si la miniatura de Drive todavía no está lista (recién subida), se reintenta
+// una vez por el otro CDN de Google antes de darse por vencida.
+function imgFallback(img){
+  if(img.dataset.fb) return;
+  const fid = img.dataset.fid;
+  if(!fid){ return; }
+  img.dataset.fb = '1';
+  img.src = `https://lh3.googleusercontent.com/d/${fid}=w600`;
+}
+
 /* ===== Tiempo límite para la red =====
    Sin esto, con señal débil la app se quedaba esperando para siempre y parecía
    trabada. Ahora corta y avisa. Leer tiene un límite corto; guardar uno más
@@ -607,25 +706,33 @@ function resizeImage(file, maxW, quality){
 }
 async function handleUpload(file, maxW, quality){
   if(!file) return null;
+  let dataUrl, fileType;
+  const ext = fileExt(file.name);
   if(isPdfFile(file)){
     if(file.size > 6000*1024){ alert('El PDF pesa '+Math.round(file.size/1024)+' KB. Subí uno de menos de 6 MB (o convertilo a foto) para que el sistema no se sature.'); return null; }
-    const data = await readAsDataURL(file);
-    return {fileData: data, fileType:'pdf', fileName:file.name};
-  }
-  if(isOfficeFile(file)){
+    dataUrl = await readAsDataURL(file); fileType = 'pdf';
+  } else if(isOfficeFile(file)){
     if(file.size > 6000*1024){ alert('El archivo pesa '+Math.round(file.size/1024)+' KB. Subí uno de menos de 6 MB para que el sistema no se sature.'); return null; }
-    const data = await readAsDataURL(file);
-    return {fileData: data, fileType:'office', fileName:file.name, ext:fileExt(file.name)};
+    dataUrl = await readAsDataURL(file); fileType = 'office';
+  } else {
+    dataUrl = await resizeImage(file, maxW||FOTO_ANCHO, quality||FOTO_CALIDAD); fileType = 'image';
   }
-  const data = await resizeImage(file, maxW||FOTO_ANCHO, quality||FOTO_CALIDAD);
-  return {fileData: data, fileType:'image', fileName:file.name};
+
+  // Con Drive activo: se sube el archivo y se guarda solo su ID (liviano).
+  if(USAR_DRIVE && hasCloudBackend){
+    const up = await subirArchivoADrive(dataUrl, file.name);
+    if(up && up.fileId){ return {fileId: up.fileId, fileType, fileName:file.name, ext}; }
+    // Si la subida falla, no se pierde el archivo: se guarda como antes (base64).
+    console.warn('Drive falló, se guarda el archivo en la planilla (base64).');
+  }
+  return {fileData: dataUrl, fileType, fileName:file.name, ext};
 }
 function fileThumb(item, cssClass){
-  if(!item || !item.fileData) return `<div class="${cssClass}"></div>`;
+  if(!item || (!item.fileData && !item.fileId)) return `<div class="${cssClass}"></div>`;
   const i = regFile(item);
   if(item.fileType==='pdf') return `<a class="file-tile ${cssClass==='doc-thumb'?'pdf-thumb':cssClass}" onclick="openReg(${i})">PDF</a>`;
   if(item.fileType==='office'){ const k=officeKind(item.ext||item.fileName); return `<div class="office-tile" onclick="openReg(${i})"><span class="ic">${k==='excel'?'📊':'📄'}</span>${k==='excel'?'EXCEL':'WORD'}</div>`; }
-  return `<img class="file-tile ${cssClass}" src="${item.fileData}" loading="lazy" decoding="async" onclick="openReg(${i})">`;
+  return `<img class="file-tile ${cssClass}" src="${fileUrl(item,'img')}" data-fid="${item.fileId||''}" onerror="imgFallback(this)" loading="lazy" decoding="async" onclick="openReg(${i})">`;
 }
 
 /* ---------- ARCHIVOS: tipos admitidos + visor interno ---------- */
@@ -645,7 +752,7 @@ function officeKind(nameOrExt){
 // Registro liviano de archivos para el visor: guarda solo un índice en cada
 // tile en vez de meter el base64 (enorme) dentro del atributo onclick.
 let __fileReg = [];
-function regFile(f){ if(!f || !f.fileData) return -1; __fileReg.push(f); return __fileReg.length-1; }
+function regFile(f){ if(!f || (!f.fileData && !f.fileId)) return -1; __fileReg.push(f); return __fileReg.length-1; }
 function openReg(i){ const f=__fileReg[i]; if(f) openFilePreview(f); }
 
 // Genera un tile clickeable uniforme (foto / PDF / Word / Excel) para usar
@@ -654,16 +761,16 @@ function previewTile(f){
   const i = regFile(f);
   if(f.fileType==='office'){ const k=officeKind(f.ext||f.fileName||f.desc); return `<div class="office-tile" onclick="openReg(${i})"><span class="ic">${k==='excel'?'📊':'📄'}</span>${k==='excel'?'EXCEL':'WORD'}</div>`; }
   if(f.fileType==='pdf'){ return `<a class="file-tile pdf-tile" onclick="openReg(${i})">PDF</a>`; }
-  return `<img class="file-tile" src="${f.fileData}" loading="lazy" decoding="async" onclick="openReg(${i})">`;
+  return `<img class="file-tile" src="${fileUrl(f,'img')}" data-fid="${f.fileId||''}" onerror="imgFallback(this)" loading="lazy" decoding="async" onclick="openReg(${i})">`;
 }
 
 function openFilePreview(f){
   const name = f.fileName || f.desc || 'Archivo';
   let inner;
   if(f.fileType==='image'){
-    inner = `<img src="${f.fileData}" style="max-width:100%; max-height:72vh; display:block; margin:0 auto; border-radius:6px;">`;
+    inner = `<img src="${fileUrl(f,'imgBig')}" data-fid="${f.fileId||''}" onerror="imgFallback(this)" style="max-width:100%; max-height:72vh; display:block; margin:0 auto; border-radius:6px;">`;
   } else if(f.fileType==='pdf'){
-    inner = `<iframe src="${f.fileData}" style="width:100%; height:72vh; border:1px solid var(--line); border-radius:6px;"></iframe>`;
+    inner = `<iframe src="${fileUrl(f,'pdf')}" style="width:100%; height:72vh; border:1px solid var(--line); border-radius:6px;"></iframe>`;
   } else {
     // Word / Excel: el navegador no los muestra; se ofrece descargar/abrir.
     const k = officeKind(f.ext || f.fileName || name);
@@ -671,7 +778,7 @@ function openFilePreview(f){
       <div style="font-size:46px; margin-bottom:10px;">${k==='excel'?'📊':'📄'}</div>
       <div style="font-weight:600; margin-bottom:4px; word-break:break-word;">${name}</div>
       <div style="color:var(--muted); font-size:12.5px; margin-bottom:18px;">Los archivos de Word y Excel no se pueden ver dentro del navegador.</div>
-      <a class="btn btn-primary" href="${f.fileData}" download="${name}">⭳ Descargar / Abrir</a>
+      <a class="btn btn-primary" href="${fileUrl(f,'download')}" target="_blank" ${f.fileId?'':`download="${name}"`}>⭳ Descargar / Abrir</a>
     </div>`;
   }
   document.getElementById('filePreviewTitle').textContent = name;
@@ -741,8 +848,9 @@ function tplSeguros(){
 }
 function seguroCard(key, seg){
   const st = seguroStatus(seg);
+  const tiene = !!(seg.fileData || seg.fileId);
   let thumb;
-  if(!seg.fileData){
+  if(!tiene){
     thumb = `<div class="seguro-thumb"></div>`;
   } else if(seg.fileType==='pdf'){
     thumb = `<a class="seguro-thumb-pdf" onclick="openReg(${regFile(seg)})">Ver PDF</a>`;
@@ -750,7 +858,7 @@ function seguroCard(key, seg){
     const k = officeKind(seg.ext||seg.fileName);
     thumb = `<div class="seguro-thumb-pdf" style="background:#EEF3F8; color:#2C6E9B;" onclick="openReg(${regFile(seg)})">${k==='excel'?'📊 Ver Excel':'📄 Ver Word'}</div>`;
   } else {
-    thumb = `<img class="seguro-thumb file-tile" src="${seg.fileData}" loading="lazy" decoding="async" onclick="openReg(${regFile(seg)})">`;
+    thumb = `<img class="seguro-thumb file-tile" src="${fileUrl(seg,'img')}" data-fid="${seg.fileId||''}" onerror="imgFallback(this)" loading="lazy" decoding="async" onclick="openReg(${regFile(seg)})">`;
   }
   return `
     <div class="seguro-card">
@@ -758,11 +866,11 @@ function seguroCard(key, seg){
       ${thumb}
       <div class="field" style="margin:0;"><label>Vencimiento</label><input type="date" id="seg_${key}_venc" value="${seg.vencimiento||''}" ${readerMode?'disabled':''} onchange="saveSeguroField('${key}')"></div>
       <input type="file" id="seg_${key}_file" accept="${ACCEPT_ARCHIVOS}" style="display:none" onchange="onSeguroFile('${key}', this)">
-      <button class="file-btn ${seg.fileData?'has-file':''}" ${readerMode?'style="pointer-events:none;opacity:.5;"':''} onclick="document.getElementById('seg_${key}_file').click()">${seg.fileData?'Reemplazar archivo':'Subir foto, PDF, Word o Excel'}</button>
+      <button class="file-btn ${tiene?'has-file':''}" ${readerMode?'style="pointer-events:none;opacity:.5;"':''} onclick="document.getElementById('seg_${key}_file').click()">${tiene?'Reemplazar archivo':'Subir foto, PDF, Word o Excel'}</button>
     </div>`;
 }
 function seguroStatus(seg){
-  if(!seg || !seg.fileData) return {cls:'gray', label:'Sin cargar'};
+  if(!seg || (!seg.fileData && !seg.fileId)) return {cls:'gray', label:'Sin cargar'};
   if(!seg.vencimiento) return {cls:'green', label:'Cargado'};
   const days = Math.ceil((new Date(seg.vencimiento) - new Date()) / 86400000);
   if(days < 0) return {cls:'red', label:'Vencido'};
@@ -773,7 +881,11 @@ async function onSeguroFile(key, input){
   const res = await handleUpload(input.files[0], FOTO_ANCHO, FOTO_CALIDAD);
   if(!res) return;
   if(!currentData.seguros[key]) currentData.seguros[key] = {};
-  currentData.seguros[key].fileData = res.fileData;
+  // Se reemplaza limpiamente (borra el archivo anterior de Drive si había).
+  const previoId = currentData.seguros[key].fileId;
+  if(previoId && previoId !== res.fileId) borrarArchivoDeDrive(previoId);
+  currentData.seguros[key].fileData = res.fileData || null;
+  currentData.seguros[key].fileId = res.fileId || null;
   currentData.seguros[key].fileType = res.fileType;
   currentData.seguros[key].fileName = res.fileName;
   currentData.seguros[key].ext = res.ext;
@@ -857,7 +969,7 @@ async function addDocumento(){
   const fileInput = document.getElementById('docFile');
   const uploaded = fileInput.files.length ? await uploadMultiple(fileInput.files, 1400, 0.85) : [];
   const res = uploaded[0] || null;
-  currentData.documentos.push({id: cryptoId(), tipo, vencimiento: venc, nota, fileData: res?res.fileData:null, fileType: res?res.fileType:null, fileName: res?res.fileName:null, extraFotos: uploaded.slice(1), fecha: todayISO()});
+  currentData.documentos.push({id: cryptoId(), tipo, vencimiento: venc, nota, fileData: res?res.fileData:null, fileId: res?res.fileId:null, fileType: res?res.fileType:null, fileName: res?res.fileName:null, ext: res?res.ext:null, extraFotos: uploaded.slice(1), fecha: todayISO()});
   logHistorial('Documento agregado: '+tipo);
   await saveCurrentFicha(); renderTab();
 }
@@ -871,7 +983,10 @@ async function saveDocEdit(){
   const fileInput = document.getElementById('docFile');
   if(fileInput.files.length){
     const uploaded = await uploadMultiple(fileInput.files, 1400, 0.85);
-    if(uploaded[0]){ d.fileData=uploaded[0].fileData; d.fileType=uploaded[0].fileType; d.fileName=uploaded[0].fileName; }
+    if(uploaded[0]){
+      if(d.fileId && d.fileId!==uploaded[0].fileId) borrarArchivoDeDrive(d.fileId);
+      d.fileData=uploaded[0].fileData||null; d.fileId=uploaded[0].fileId||null; d.fileType=uploaded[0].fileType; d.fileName=uploaded[0].fileName; d.ext=uploaded[0].ext;
+    }
     if(uploaded.length>1) d.extraFotos = [...(d.extraFotos||[]), ...uploaded.slice(1)];
   }
   logHistorial('Documento editado: '+d.tipo);
@@ -881,6 +996,7 @@ async function saveDocEdit(){
 function delDocumento(id){
   if(!confirm('¿Eliminar este documento?')) return;
   const d = currentData.documentos.find(x=>x.id===id);
+  borrarArchivosDe(d);
   currentData.documentos = currentData.documentos.filter(x=>x.id!==id);
   logHistorial('Documento eliminado: '+(d?d.tipo:''));
   saveCurrentFicha(); renderTab();
@@ -945,7 +1061,7 @@ async function addContrato(){
   const fileInput = document.getElementById('conFile');
   const uploaded = fileInput.files.length ? await uploadMultiple(fileInput.files, 1400, 0.85) : [];
   const res = uploaded[0] || null;
-  currentData.contratos.push({id: cryptoId(), tipo, empresa, fecha, nota, fileData: res?res.fileData:null, fileType: res?res.fileType:null, fileName: res?res.fileName:null, extraFotos: uploaded.slice(1)});
+  currentData.contratos.push({id: cryptoId(), tipo, empresa, fecha, nota, fileData: res?res.fileData:null, fileId: res?res.fileId:null, fileType: res?res.fileType:null, fileName: res?res.fileName:null, ext: res?res.ext:null, extraFotos: uploaded.slice(1)});
   logHistorial('Documento legal agregado: '+tipo);
   await saveCurrentFicha(); renderTab();
 }
@@ -960,7 +1076,10 @@ async function saveContratoEdit(){
   const fileInput = document.getElementById('conFile');
   if(fileInput.files.length){
     const uploaded = await uploadMultiple(fileInput.files, 1400, 0.85);
-    if(uploaded[0]){ d.fileData=uploaded[0].fileData; d.fileType=uploaded[0].fileType; d.fileName=uploaded[0].fileName; }
+    if(uploaded[0]){
+      if(d.fileId && d.fileId!==uploaded[0].fileId) borrarArchivoDeDrive(d.fileId);
+      d.fileData=uploaded[0].fileData||null; d.fileId=uploaded[0].fileId||null; d.fileType=uploaded[0].fileType; d.fileName=uploaded[0].fileName; d.ext=uploaded[0].ext;
+    }
     if(uploaded.length>1) d.extraFotos = [...(d.extraFotos||[]), ...uploaded.slice(1)];
   }
   logHistorial('Documento legal editado: '+d.tipo);
@@ -970,6 +1089,7 @@ async function saveContratoEdit(){
 function delContrato(id){
   if(!confirm('¿Eliminar este documento?')) return;
   const d = currentData.contratos.find(x=>x.id===id);
+  borrarArchivosDe(d);
   currentData.contratos = currentData.contratos.filter(x=>x.id!==id);
   logHistorial('Documento legal eliminado: '+(d?d.tipo:''));
   saveCurrentFicha(); renderTab();
@@ -1097,19 +1217,19 @@ async function addSinFoto(input){
   for(const f of input.files){ const res = await handleUpload(f, FOTO_ANCHO, FOTO_CALIDAD); if(res) sinFotosTemp.push(res); }
   input.value=''; renderSinFields('siniestro');
 }
-function delSinFoto(idx){ sinFotosTemp.splice(idx,1); renderSinFields('siniestro'); }
+function delSinFoto(idx){ quitarTempDeDrive(sinFotosTemp[idx], editingSiniestroId); sinFotosTemp.splice(idx,1); renderSinFields('siniestro'); }
 async function addSinComprobante(input){
   if(!input.files.length) return;
   for(const f of input.files){ const res = await handleUpload(f, FOTO_ANCHO, FOTO_CALIDAD); if(res) sinComprobantesTemp.push(res); }
   input.value=''; renderSinFields('infraccion');
 }
-function delSinComprobante(idx){ sinComprobantesTemp.splice(idx,1); renderSinFields('infraccion'); }
+function delSinComprobante(idx){ quitarTempDeDrive(sinComprobantesTemp[idx], editingSiniestroId); sinComprobantesTemp.splice(idx,1); renderSinFields('infraccion'); }
 async function addSinCopia(input){
   if(!input.files.length) return;
   for(const f of input.files){ const res = await handleUpload(f, FOTO_ANCHO, FOTO_CALIDAD); if(res) sinCopiasTemp.push(res); }
   input.value=''; renderSinFields('infraccion');
 }
-function delSinCopia(idx){ sinCopiasTemp.splice(idx,1); renderSinFields('infraccion'); }
+function delSinCopia(idx){ quitarTempDeDrive(sinCopiasTemp[idx], editingSiniestroId); sinCopiasTemp.splice(idx,1); renderSinFields('infraccion'); }
 async function addSiniestro(){
   const categoria = document.getElementById('sinCategoria').value;
   if(categoria==='infraccion'){
@@ -1146,6 +1266,7 @@ function cancelSiniestroEdit(){ editingSiniestroId = null; sinFotosTemp=[]; sinC
 async function saveSiniestroEdit(){
   const categoria = document.getElementById('sinCategoria').value;
   const s = currentData.siniestros.find(x=>x.id===editingSiniestroId);
+  const sViejo = Object.assign({}, s);
   s.categoria = categoria;
   if(categoria==='infraccion'){
     s.fecha = document.getElementById('sinFecha').value;
@@ -1168,12 +1289,14 @@ async function saveSiniestroEdit(){
     delete s.lugar; delete s.responsable; delete s.monto; delete s.pagada; delete s.comprobantesPago; delete s.copiasInfraccion;
     logHistorial('Siniestro editado: '+s.tipo);
   }
+  reconciliarBorrado(sViejo, s);
   editingSiniestroId = null; sinFotosTemp=[]; sinComprobantesTemp=[]; sinCopiasTemp=[];
   await saveCurrentFicha(); renderTab();
 }
 function delSiniestro(id){
   if(!confirm('¿Eliminar este registro?')) return;
   const s = currentData.siniestros.find(x=>x.id===id);
+  borrarArchivosDe(s);
   currentData.siniestros = currentData.siniestros.filter(x=>x.id!==id);
   logHistorial((s&&s.categoria==='infraccion'?'Infracción eliminada':'Siniestro eliminado')+(s&&s.tipo?(': '+s.tipo):''));
   saveCurrentFicha(); renderTab();
@@ -1247,7 +1370,7 @@ function editFotoDesc(id){
   if(nuevo===null) return;
   f.desc = nuevo; saveCurrentFicha(); renderTab();
 }
-function delFoto(id){ if(!confirm('¿Eliminar este archivo?')) return; currentData.fotos = currentData.fotos.filter(f=>f.id!==id); saveCurrentFicha(); renderTab(); }
+function delFoto(id){ if(!confirm('¿Eliminar este archivo?')) return; const f = currentData.fotos.find(x=>x.id===id); borrarArchivosDe(f); currentData.fotos = currentData.fotos.filter(f=>f.id!==id); saveCurrentFicha(); renderTab(); }
 
 /* ---------- REGISTROS ---------- */
 function tplRegistros(){
@@ -1350,13 +1473,13 @@ async function addMantFoto(input){
   for(const f of input.files){ const res = await handleUpload(f, FOTO_ANCHO, FOTO_CALIDAD); if(res) regMantFotos.push({desc:f.name, fileData:res.fileData, fileType:res.fileType, fileName:res.fileName, ext:res.ext}); }
   input.value=''; renderMantExtras();
 }
-function delMantFoto(idx){ regMantFotos.splice(idx,1); renderMantExtras(); }
+function delMantFoto(idx){ quitarTempDeDrive(regMantFotos[idx], editingRegId); regMantFotos.splice(idx,1); renderMantExtras(); }
 async function addMantArchivo(input){
   if(!input.files.length) return;
   for(const f of input.files){ const res = await handleUpload(f, FOTO_ANCHO, FOTO_CALIDAD); if(res) regMantArchivos.push({desc:f.name, fileData:res.fileData, fileType:res.fileType, fileName:res.fileName, ext:res.ext}); }
   input.value=''; renderMantExtras();
 }
-function delMantArchivo(idx){ regMantArchivos.splice(idx,1); renderMantExtras(); }
+function delMantArchivo(idx){ quitarTempDeDrive(regMantArchivos[idx], editingRegId); regMantArchivos.splice(idx,1); renderMantExtras(); }
 
 /* ---------- Extras del ALQUILER: Check List (con luz) + fotos ---------- */
 function alqExtrasHTML(){
@@ -1389,13 +1512,13 @@ async function addAlqChecklist(input){
   if(res) regAlqChecklist = {desc:input.files[0].name, fileData:res.fileData, fileType:res.fileType, fileName:res.fileName, ext:res.ext};
   input.value=''; renderAlqExtras();
 }
-function delAlqChecklist(){ regAlqChecklist = null; renderAlqExtras(); }
+function delAlqChecklist(){ quitarTempDeDrive(regAlqChecklist, editingRegId); regAlqChecklist = null; renderAlqExtras(); }
 async function addAlqFoto(input){
   if(!input.files.length) return;
   for(const f of input.files){ const res = await handleUpload(f, FOTO_ANCHO, FOTO_CALIDAD); if(res) regAlqFotos.push({desc:f.name, fileData:res.fileData, fileType:res.fileType, fileName:res.fileName, ext:res.ext}); }
   input.value=''; renderAlqExtras();
 }
-function delAlqFoto(idx){ regAlqFotos.splice(idx,1); renderAlqExtras(); }
+function delAlqFoto(idx){ quitarTempDeDrive(regAlqFotos[idx], editingRegId); regAlqFotos.splice(idx,1); renderAlqExtras(); }
 
 function collectRegForm(){
   const tipo = document.getElementById('regTipo').value;
@@ -1424,6 +1547,7 @@ function cancelRegEdit(){ editingRegId = null; regMantFotos=[]; regMantArchivos=
 async function saveRegEdit(){
   const data = collectRegForm();
   const idx = currentData.registros.findIndex(r=>r.id===editingRegId);
+  reconciliarBorrado(currentData.registros[idx], data);
   currentData.registros[idx] = {id: editingRegId, ...data};
   logHistorial('Registro de '+tipoLabel(data.tipo)+' editado');
   editingRegId = null; regMantFotos=[]; regMantArchivos=[]; regAlqChecklist=null; regAlqFotos=[];
@@ -1432,8 +1556,9 @@ async function saveRegEdit(){
 function delRegistro(id){
   if(!confirm('¿Eliminar este registro?')) return;
   const r = currentData.registros.find(x=>x.id===id);
+  borrarArchivosDe(r);
   currentData.registros = currentData.registros.filter(x=>x.id!==id);
-  logHistorial('Registro de '+(r?r.tipo:'')+' eliminado');
+  logHistorial('Registro de '+tipoLabel(r?r.tipo:'')+' eliminado');
   saveCurrentFicha(); renderTab();
 }
 
@@ -1543,8 +1668,39 @@ function simpleHash(str){
   return ((h1>>>0).toString(16)+(h2>>>0).toString(16)).toUpperCase().slice(0,10);
 }
 
+// Al exportar, los archivos que están en Drive no traen el contenido (fileData).
+// Acá se guardan los bytes que se bajan una sola vez desde el backend.
+let __pdfBytes = {};
+function tieneArchivo(x){ return !!(x && (x.fileData || x.fileId)); }
+function bytesDe(item){
+  if(!item) return null;
+  if(item.fileData) return item.fileData;
+  if(item.fileId && __pdfBytes[item.fileId]) return __pdfBytes[item.fileId];
+  return null;
+}
+// Recorre las fichas, junta los fileId que faltan y baja su contenido (una vez cada uno).
+async function precargarArchivosPDF(fichas){
+  const ids = new Set();
+  const add = f => { if(f && f.fileId && !f.fileData && !__pdfBytes[f.fileId]) ids.add(f.fileId); };
+  for(const ficha of fichas){
+    (ficha.fotos||[]).forEach(add);
+    Object.values(ficha.seguros||{}).forEach(add);
+    (ficha.documentos||[]).forEach(d=>{ add(d); (d.extraFotos||[]).forEach(add); });
+    (ficha.contratos||[]).forEach(d=>{ add(d); (d.extraFotos||[]).forEach(add); });
+    (ficha.siniestros||[]).forEach(s=>{ (s.fotos||[]).forEach(add); (s.comprobantesPago||[]).forEach(add); (s.copiasInfraccion||[]).forEach(add); });
+    (ficha.registros||[]).forEach(r=>{ add(r.checklist); (r.fotos||[]).forEach(add); (r.archivos||[]).forEach(add); });
+  }
+  for(const id of ids){
+    try{
+      const res = await fetchConLimite(`${APPS_SCRIPT_URL}?action=getFile&fileId=${encodeURIComponent(id)}`, null, TIMEOUT_GUARDADO_MS);
+      const data = await res.json();
+      if(data && data.fileData) __pdfBytes[id] = data.fileData;
+    }catch(e){ console.error('No se pudo precargar un archivo para el PDF', id, e); }
+  }
+}
+
 function fitImage(doc, item, x, y, maxW, maxH){
-  if(!item || !item.fileData || item.fileType==='pdf') return {w:0,h:0,drawn:false};
+  if(!item || item.fileType==='pdf') return {w:0,h:0,drawn:false};
   if(item.fileType==='office'){
     // Word / Excel: no se pueden dibujar; se deja constancia por nombre.
     const k = officeKind(item.ext||item.fileName);
@@ -1557,12 +1713,14 @@ function fitImage(doc, item, x, y, maxW, maxH){
     doc.text(nm.slice(0,2), x+maxW/2, y+maxH/2+6, {align:'center'});
     return {w:maxW,h:maxH,drawn:true};
   }
+  const data = bytesDe(item);
+  if(!data) return {w:0,h:0,drawn:false};
   try{
-    const props = doc.getImageProperties(item.fileData);
+    const props = doc.getImageProperties(data);
     const ratio = Math.min(maxW/props.width, maxH/props.height);
     const w = props.width*ratio, h = props.height*ratio;
     const ox = x + (maxW-w)/2, oy = y + (maxH-h)/2;
-    doc.addImage(item.fileData, props.fileType, ox, oy, w, h);
+    doc.addImage(data, props.fileType, ox, oy, w, h);
     return {w,h,drawn:true};
   }catch(e){ return {w:0,h:0,drawn:false}; }
 }
@@ -1591,6 +1749,20 @@ async function exportarPDF(){
   }
   const { jsPDF } = window.jspdf;
 
+  // Se bajan (una sola vez) los archivos que viven en Drive, para poder
+  // incrustarlos en el PDF. Los archivos viejos (base64) no necesitan esto.
+  __pdfBytes = {};
+  if(USAR_DRIVE && hasCloudBackend){
+    const fichasPre = [];
+    for(const patente of selected){
+      let ficha;
+      if(patente===current && currentData){ ficha = currentData; }
+      else{ try{ const r = await storageAdapter.get('ficha:'+patente, false); ficha = r ? JSON.parse(r.value) : null; }catch(e){ ficha = null; } }
+      if(ficha) fichasPre.push(ficha);
+    }
+    try{ await precargarArchivosPDF(fichasPre); }catch(e){ console.error('Precarga de archivos incompleta', e); }
+  }
+
   const doc = new jsPDF({unit:'pt', format:'a4'});
   const pageW = doc.internal.pageSize.getWidth();
   const pageH = doc.internal.pageSize.getHeight();
@@ -1602,9 +1774,11 @@ async function exportarPDF(){
      como páginas al final del PDF exportado (Anexo). */
   const adjuntosPdf = [];
   function registrarAdjuntoPdf(item, meta){
-    if(!item || !item.fileData) return;
+    if(!item) return;
+    const data = bytesDe(item);
+    if(!data) return;
     adjuntosPdf.push({
-      fileData: item.fileData,
+      fileData: data,
       fileName: item.fileName || 'documento.pdf',
       patente: (meta && meta.patente) || '',
       label: (meta && meta.label) || 'Documento adjunto'
@@ -1645,7 +1819,7 @@ async function exportarPDF(){
         doc.text('PDF', tx+tw/2, y+th/2+3-4, {align:'center'});
         doc.setFont('helvetica','normal'); doc.setFontSize(6);
         doc.text('Ver Anexo', tx+tw/2, y+th/2+8, {align:'center'});
-        if(it.fileData) registrarAdjuntoPdf(it, meta);
+        registrarAdjuntoPdf(it, meta);
       } else if(it.fileType==='office'){
         // Word / Excel no se pueden convertir en hojas: se listan por nombre.
         const k = officeKind(it.ext||it.fileName);
@@ -1715,12 +1889,12 @@ async function exportarPDF(){
         const st = seguroStatus(seg);
         ensureSpace(66);
         const imgBox = {x:margin, y:y, w:56, h:56};
-        if(seg.fileData && seg.fileType!=='pdf'){ fitImage(doc, seg, imgBox.x, imgBox.y, imgBox.w, imgBox.h); }
+        if(tieneArchivo(seg) && seg.fileType!=='pdf'){ fitImage(doc, seg, imgBox.x, imgBox.y, imgBox.w, imgBox.h); }
         doc.setFont('helvetica','bold'); doc.setFontSize(11); doc.setTextColor(20,20,20);
         doc.text(SEG_LABELS[k], margin+68, y+14);
         doc.setFont('helvetica','normal'); doc.setFontSize(9.5); doc.setTextColor(90,98,108);
         doc.text(`Estado: ${st.label}${seg.vencimiento?('   ·   Vence: '+formatDate(seg.vencimiento)):''}`, margin+68, y+30);
-        if(seg.fileData && seg.fileType==='pdf'){
+        if(tieneArchivo(seg) && seg.fileType==='pdf'){
           doc.text('PDF adjunto: '+(seg.fileName||'documento')+'  (ver Anexo)', margin+68, y+44);
           registrarAdjuntoPdf(seg, {patente: v.patente, label: SEG_LABELS[k]});
         }
@@ -1735,14 +1909,14 @@ async function exportarPDF(){
       for(const d of ficha.documentos){
         ensureSpace(78);
         const yStart = y;
-        if(d.fileData && d.fileType!=='pdf') fitImage(doc, d, margin, y, 62, 62);
+        if(tieneArchivo(d) && d.fileType!=='pdf') fitImage(doc, d, margin, y, 62, 62);
         doc.setFont('helvetica','bold'); doc.setFontSize(11); doc.setTextColor(20,20,20);
         doc.text(d.tipo, margin+74, y+13);
         doc.setFont('helvetica','normal'); doc.setFontSize(9.5); doc.setTextColor(90,98,108);
         let ny = y+28;
         if(d.nota){ const lines = doc.splitTextToSize(d.nota, pageW-margin*2-74); doc.text(lines, margin+74, ny); ny += lines.length*12; }
         doc.text(d.vencimiento ? ('Vencimiento: '+formatDate(d.vencimiento)) : 'Sin vencimiento', margin+74, ny);
-        if(d.fileData && d.fileType==='pdf'){
+        if(tieneArchivo(d) && d.fileType==='pdf'){
           ny+=13; doc.text('PDF adjunto: '+(d.fileName||'documento')+'  (ver Anexo)', margin+74, ny);
           registrarAdjuntoPdf(d, {patente: v.patente, label: 'Documentación — '+d.tipo});
         }
@@ -1758,7 +1932,7 @@ async function exportarPDF(){
       for(const d of ficha.contratos){
         ensureSpace(78);
         const yStart = y;
-        if(d.fileData && d.fileType!=='pdf') fitImage(doc, d, margin, y, 62, 62);
+        if(tieneArchivo(d) && d.fileType!=='pdf') fitImage(doc, d, margin, y, 62, 62);
         doc.setFont('helvetica','bold'); doc.setFontSize(11); doc.setTextColor(20,20,20);
         doc.text(d.tipo, margin+74, y+13);
         doc.setFont('helvetica','normal'); doc.setFontSize(9.5); doc.setTextColor(90,98,108);
@@ -1766,7 +1940,7 @@ async function exportarPDF(){
         const info = [d.empresa, d.nota].filter(Boolean).join(' · ');
         if(info){ const lines = doc.splitTextToSize(info, pageW-margin*2-74); doc.text(lines, margin+74, ny); ny += lines.length*12; }
         if(d.fecha) doc.text(formatDate(d.fecha), margin+74, ny);
-        if(d.fileData && d.fileType==='pdf'){
+        if(tieneArchivo(d) && d.fileType==='pdf'){
           ny+=13; doc.text('PDF adjunto: '+(d.fileName||'documento')+'  (ver Anexo)', margin+74, ny);
           registrarAdjuntoPdf(d, {patente: v.patente, label: 'Contrato — '+d.tipo});
         }

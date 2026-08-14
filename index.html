@@ -311,10 +311,12 @@ function quitarTempDeDrive(item, editandoId){
 function fileUrl(item, kind){
   if(!item) return '';
   if(item.fileId){
-    if(kind==='img')     return `https://drive.google.com/thumbnail?id=${item.fileId}&sz=w400`;
-    if(kind==='imgBig')  return `https://drive.google.com/thumbnail?id=${item.fileId}&sz=w1600`;
-    if(kind==='pdf')     return `https://drive.google.com/file/d/${item.fileId}/preview`;
-    return `https://drive.google.com/uc?export=download&id=${item.fileId}`;
+    // Se pide el archivo a través del propio backend (Apps Script) en vez de
+    // a Drive directamente. Así funciona siempre, para cualquier visitante,
+    // sin depender de que el enlace "cualquiera con el enlace" de Drive sea
+    // realmente público (algunos dominios de Google Workspace lo restringen
+    // aunque en la pantalla de compartir se vea configurado como abierto).
+    return `${APPS_SCRIPT_URL}?action=file&fileId=${item.fileId}`;
   }
   return item.fileData || '';
 }

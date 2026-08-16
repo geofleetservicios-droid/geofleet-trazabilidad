@@ -1055,7 +1055,7 @@ function tplDocumentos(){
         <div class="field" style="flex:2"><label>Nota</label><input type="text" id="docNota" placeholder="Ej: póliza N° 12345" value="${editing?editing.nota||'':''}"></div>
         <div class="field" style="flex:0 0 auto;"><label>Archivo(s)</label>
           <input type="file" id="docFile" accept="${ACCEPT_ARCHIVOS}" multiple style="display:none" onchange="onDocFileChange(this)">
-          <div class="file-btn" id="docFileBtn" onclick="document.getElementById('docFile').click()">${editing&&editing.fileData?'Reemplazar':'Foto, PDF, Word o Excel'}</div>
+          <div class="file-btn" id="docFileBtn" onclick="document.getElementById('docFile').click()">${editing&&tieneArchivo(editing)?'Reemplazar':'Foto, PDF, Word o Excel'}</div>
         </div>
         <button class="btn btn-primary btn-sm" onclick="${editing?'saveDocEdit()':'addDocumento()'}">${editing?'Guardar':'Agregar'}</button>
         ${editing?'<button class="btn btn-ghost btn-sm" onclick="cancelDocEdit()">Cancelar</button>':''}
@@ -1158,7 +1158,7 @@ function tplContratos(){
         <div class="field" style="flex:2"><label>Nota</label><input type="text" id="conNota" placeholder="Ej: contrato N°, vigencia" value="${editing?editing.nota||'':''}"></div>
         <div class="field" style="flex:0 0 auto;"><label>Archivo(s)</label>
           <input type="file" id="conFile" accept="${ACCEPT_ARCHIVOS}" multiple style="display:none" onchange="onConFileChange(this)">
-          <div class="file-btn" id="conFileBtn" onclick="document.getElementById('conFile').click()">${editing&&editing.fileData?'Reemplazar':'Foto, PDF, Word o Excel'}</div>
+          <div class="file-btn" id="conFileBtn" onclick="document.getElementById('conFile').click()">${editing&&tieneArchivo(editing)?'Reemplazar':'Foto, PDF, Word o Excel'}</div>
         </div>
         <button class="btn btn-primary btn-sm" onclick="${editing?'saveContratoEdit()':'addContrato()'}">${editing?'Guardar':'Agregar'}</button>
         ${editing?'<button class="btn btn-ghost btn-sm" onclick="cancelContratoEdit()">Cancelar</button>':''}
@@ -1621,7 +1621,7 @@ function delMantArchivo(idx){ quitarTempDeDrive(regMantArchivos[idx], editingReg
 
 /* ---------- Extras del ALQUILER: Check List (con luz) + fotos ---------- */
 function alqExtrasHTML(){
-  const tieneCheck = !!(regAlqChecklist && regAlqChecklist.fileData);
+  const tieneCheck = tieneArchivo(regAlqChecklist);
   const luz = tieneCheck
     ? `<span class="check-light ok"><span class="dot"></span>Check List cargado ✓</span>`
     : `<span class="check-light miss"><span class="dot"></span>Falta cargar el Check List</span>`;
@@ -1924,13 +1924,19 @@ async function exportarPDF(){
   }
 
   function ensureSpace(h){ if(y + h > pageH - 60){ doc.addPage(); y = margin; } }
-  function heading(text, size){
-    size = size||14;
-    ensureSpace(size*1.9);
-    doc.setFillColor(243,245,247); doc.rect(margin-4, y-size*0.85, pageW-margin*2+8, size*1.65, 'F');
-    doc.setFillColor(232,89,12); doc.rect(margin-4, y-size*0.85, 3, size*1.65, 'F');
-    doc.setFont('helvetica','bold'); doc.setFontSize(size); doc.setTextColor(22,32,42);
-    doc.text(text, margin+8, y); y += size*1.55;
+  function heading(text){
+    // Encabezado "display": banda gris de alto fijo, filete naranja y el texto
+    // en MAYÚSCULAS con tracking (setCharSpace) para diferenciarlo del cuerpo.
+    const fs = 10.5;      // tamaño del texto del encabezado
+    const boxH = 22;      // alto fijo de la banda → separadores y secciones alineados
+    ensureSpace(boxH + 12);
+    doc.setFillColor(243,245,247); doc.rect(margin-4, y, pageW-margin*2+8, boxH, 'F');
+    doc.setFillColor(232,89,12);   doc.rect(margin-4, y, 3, boxH, 'F');
+    doc.setFont('helvetica','bold'); doc.setFontSize(fs); doc.setTextColor(22,32,42);
+    doc.setCharSpace(0.7);
+    doc.text((text||'').toUpperCase(), margin+10, y + boxH/2 + fs*0.34);
+    doc.setCharSpace(0);
+    y += boxH + 12;
   }
   function writeText(text, x, maxWidth, opts){
     opts = opts||{};
@@ -1942,7 +1948,20 @@ async function exportarPDF(){
     doc.text(lines, x, y);
     y += lines.length*(size*1.25);
   }
-  function line(){ ensureSpace(14); doc.setDrawColor(214,218,225); doc.line(margin,y,pageW-margin,y); y += 14; }
+  function line(){ ensureSpace(22); y += 8; doc.setDrawColor(224,227,231); doc.setLineWidth(0.7); doc.line(margin,y,pageW-margin,y); y += 16; }
+  // Pastilla de estado (verde/rojo/gris) para mostrar situaciones de un vistazo.
+  function statusChip(text, x, cy, cls){
+    const map = { green:[[225,243,231],[47,125,79]], red:[[251,226,223],[192,57,43]], gray:[[238,240,242],[107,118,132]] };
+    const col = map[cls] || map.gray;
+    doc.setFont('helvetica','bold'); doc.setFontSize(7.5);
+    const w = doc.getTextWidth(text.toUpperCase()) + 14;
+    doc.setFillColor(col[0][0],col[0][1],col[0][2]);
+    doc.roundedRect(x, cy-8, w, 13, 6, 6, 'F');
+    doc.setTextColor(col[1][0],col[1][1],col[1][2]);
+    doc.text(text.toUpperCase(), x+7, cy+1);
+    doc.setTextColor(90,98,108); doc.setFontSize(9.5); doc.setFont('helvetica','normal');
+    return w;
+  }
   function thumbRow(items, xStart, meta){
     if(!items || !items.length) return;
     const tw=54, th=54, gap=8;
@@ -2008,8 +2027,9 @@ async function exportarPDF(){
     doc.setFillColor(232,89,12); doc.rect(margin, y, 4, 22, 'F');
     doc.setFont('courier','bold'); doc.setFontSize(15); doc.setTextColor(22,32,42);
     doc.text(v.patente, margin+12, y+16);
+    const plateW = doc.getTextWidth(v.patente);
     doc.setFont('helvetica','normal'); doc.setFontSize(10.5); doc.setTextColor(90,98,108);
-    doc.text(`${v.marca||''} ${v.modelo||''}   ·   Año ${v.anio||'-'}`, margin+115, y+16);
+    doc.text(`${v.marca||''} ${v.modelo||''}   ·   Año ${v.anio||'-'}`, margin+12+plateW+16, y+16);
     y += 34;
 
     if(incl.datos){
@@ -2030,8 +2050,8 @@ async function exportarPDF(){
         if(tieneArchivo(seg) && seg.fileType!=='pdf'){ fitImage(doc, seg, imgBox.x, imgBox.y, imgBox.w, imgBox.h); }
         doc.setFont('helvetica','bold'); doc.setFontSize(11); doc.setTextColor(20,20,20);
         doc.text(SEG_LABELS[k], margin+68, y+14);
-        doc.setFont('helvetica','normal'); doc.setFontSize(9.5); doc.setTextColor(90,98,108);
-        doc.text(`Estado: ${st.label}${seg.vencimiento?('   ·   Vence: '+formatDate(seg.vencimiento)):''}`, margin+68, y+30);
+        const chipW = statusChip(st.label, margin+68, y+29, st.cls);
+        if(seg.vencimiento){ doc.setFont('helvetica','normal'); doc.setFontSize(9.5); doc.setTextColor(90,98,108); doc.text('Vence: '+formatDate(seg.vencimiento), margin+68+chipW+8, y+30); }
         if(tieneArchivo(seg) && seg.fileType==='pdf'){
           doc.text('PDF adjunto: '+(seg.fileName||'documento')+'  (ver Anexo)', margin+68, y+44);
           registrarAdjuntoPdf(seg, {patente: v.patente, label: SEG_LABELS[k]});
@@ -2180,11 +2200,11 @@ async function exportarPDF(){
         if(r.tipo==='uso'){
           // Estado del Check List + sus archivos y fotos.
           doc.setFont('helvetica','normal'); doc.setFontSize(8.5);
-          if(r.checklist && r.checklist.fileData){ doc.setTextColor(30,123,69); doc.text('Check List: cargado', margin+78, y); }
+          if(tieneArchivo(r.checklist)){ doc.setTextColor(30,123,69); doc.text('Check List: cargado', margin+78, y); }
           else { doc.setTextColor(178,58,27); doc.text('Check List: sin cargar', margin+78, y); }
           y += 13;
           const alqItems = [];
-          if(r.checklist && r.checklist.fileData) alqItems.push(r.checklist);
+          if(tieneArchivo(r.checklist)) alqItems.push(r.checklist);
           if(r.fotos && r.fotos.length) alqItems.push(...r.fotos);
           thumbRow(alqItems, margin+78, {patente: v.patente, label: 'Alquiler'+(r.cliente?(' — '+r.cliente):'')+' — '+formatDate(r.fechaInicio)});
         }
